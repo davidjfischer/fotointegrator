@@ -159,16 +159,34 @@ def get_or_create_album(token, album_title):
         'Authorization': f'Bearer {token}',
     }
 
-    # Search for existing album
+    # Search for existing album with pagination
     list_url = 'https://photoslibrary.googleapis.com/v1/albums'
-    response = requests.get(list_url, headers=headers)
+    page_token = None
 
-    if response.status_code == 200:
-        albums = response.json().get('albums', [])
-        for album in albums:
-            if album.get('title') == album_title:
-                logger.info(f"Using existing album: {album_title}")
-                return album['id']
+    while True:
+        params = {'pageSize': 50}
+        if page_token:
+            params['pageToken'] = page_token
+
+        response = requests.get(list_url, headers=headers, params=params)
+
+        if response.status_code == 200:
+            result = response.json()
+            albums = result.get('albums', [])
+
+            # Check if album exists in this page
+            for album in albums:
+                if album.get('title') == album_title:
+                    logger.info(f"Using existing album: {album_title}")
+                    return album['id']
+
+            # Check if there are more pages
+            page_token = result.get('nextPageToken')
+            if not page_token:
+                break  # No more pages
+        else:
+            logger.warning(f"Failed to list albums: {response.text}")
+            break
 
     # Create new album if not found
     create_url = 'https://photoslibrary.googleapis.com/v1/albums'
