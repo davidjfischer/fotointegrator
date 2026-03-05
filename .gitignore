@@ -12,9 +12,10 @@ token.pickle
 *.avi
 *.webm
 
-# Processed/failed file logs
+# Processed/failed/skipped file logs
 processed_files.txt
 failed_files.txt
+skipped_files.txt
 
 # Python
 __pycache__/

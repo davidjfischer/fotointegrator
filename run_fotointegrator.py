@@ -30,6 +30,7 @@ SCOPES = [
 
 PROCESSED_FILES_LOG = 'processed_files.txt'
 FAILED_FILES_LOG = 'failed_files.txt'
+SKIPPED_FILES_LOG = 'skipped_files.txt'
 MAX_RETRIES = 10
 RETRY_WAIT_SECONDS = 30
 
@@ -72,6 +73,25 @@ def save_failed_file(file_id, file_url, error_msg):
         # Replace newlines and pipes in error message to keep format consistent
         error_msg_cleaned = error_msg.replace('\n', ' ').replace('|', ':')
         f.write(f"{file_id}|{file_url}|{error_msg_cleaned}\n")
+
+def load_skipped_files():
+    """Load the set of skipped file IDs from the log file."""
+    if not os.path.exists(SKIPPED_FILES_LOG):
+        return set()
+
+    skipped = set()
+    with open(SKIPPED_FILES_LOG, 'r') as f:
+        for line in f:
+            # Extract file ID from each line (format: file_id|url|mimetype)
+            parts = line.strip().split('|')
+            if parts:
+                skipped.add(parts[0])
+    return skipped
+
+def save_skipped_file(file_id, file_url, mime_type):
+    """Save a skipped file ID, its Drive URL, and MIME type to the log file."""
+    with open(SKIPPED_FILES_LOG, 'a') as f:
+        f.write(f"{file_id}|{file_url}|{mime_type}\n")
 
 def get_services():
     creds = None
@@ -242,11 +262,13 @@ def process_single_file_with_retry(service, token, file_id, file_name, album_id=
     # All retries failed
     return False, last_error
 
-def process_folder(service, token, folder_id, album_id=None, processed_files=None, failed_files=None):
+def process_folder(service, token, folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None):
     if processed_files is None:
         processed_files = set()
     if failed_files is None:
         failed_files = set()
+    if skipped_files is None:
+        skipped_files = set()
 
     query = f"'{folder_id}' in parents and trashed = false"
     results = service.files().list(q=query, fields="files(id, name, mimeType, webViewLink)").execute()
@@ -254,7 +276,7 @@ def process_folder(service, token, folder_id, album_id=None, processed_files=Non
 
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            process_folder(service, token, item['id'], album_id, processed_files, failed_files)
+            process_folder(service, token, item['id'], album_id, processed_files, failed_files, skipped_files)
         elif 'image' in item['mimeType'] or 'video' in item['mimeType']:
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
@@ -284,6 +306,16 @@ def process_folder(service, token, folder_id, album_id=None, processed_files=Non
                 save_failed_file(file_id, file_url, error_msg)
                 failed_files.add(file_id)
                 logger.error(f"Failed permanently: {item['name']}")
+        else:
+            # Skip non-image/video files
+            file_id = item['id']
+            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+
+            # Check if already logged as skipped
+            if file_id not in skipped_files:
+                save_skipped_file(file_id, file_url, item['mimeType'])
+                skipped_files.add(file_id)
+                logger.info(f"Skipping (not image/video): {item['name']} (type: {item['mimeType']})")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download photos/videos from Google Drive and upload to Google Photos')
@@ -294,11 +326,13 @@ if __name__ == '__main__':
     folder_id = extract_folder_id(args.folder)
     logger.info(f"Using folder ID: {folder_id}")
 
-    # Load previously processed and failed files
+    # Load previously processed, failed, and skipped files
     processed_files = load_processed_files()
     failed_files = load_failed_files()
+    skipped_files = load_skipped_files()
     logger.info(f"Loaded {len(processed_files)} previously processed files")
     logger.info(f"Loaded {len(failed_files)} previously failed files")
+    logger.info(f"Loaded {len(skipped_files)} previously skipped files")
 
     # Get services
     drive_service, auth_token = get_services()
@@ -310,9 +344,10 @@ if __name__ == '__main__':
     album_id = get_or_create_album(auth_token, folder_name)
 
     # Process folder and upload to album
-    process_folder(drive_service, auth_token, folder_id, album_id, processed_files, failed_files)
+    process_folder(drive_service, auth_token, folder_id, album_id, processed_files, failed_files, skipped_files)
 
     logger.info("Processing complete!")
     logger.info(f"Successfully processed: {len(processed_files)} files")
     logger.info(f"Failed: {len(failed_files)} files")
+    logger.info(f"Skipped (non-image/video): {len(skipped_files)} files")
 
