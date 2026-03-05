@@ -12,13 +12,12 @@ token.pickle
 *.avi
 *.webm
 
-# Processed/failed/skipped file logs
-processed_files.txt
-failed_files.txt
-skipped_files.txt
+# State directory with file tracking logs
+state/
 
 # Log files directory
 logs/
+*.log
 
 # Python
 __pycache__/

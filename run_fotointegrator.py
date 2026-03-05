@@ -47,9 +47,13 @@ SCOPES = [
     'https://www.googleapis.com/auth/photoslibrary'
 ]
 
-PROCESSED_FILES_LOG = 'processed_files.txt'
-FAILED_FILES_LOG = 'failed_files.txt'
-SKIPPED_FILES_LOG = 'skipped_files.txt'
+# Create state directory for file tracking logs
+STATE_DIR = 'state'
+os.makedirs(STATE_DIR, exist_ok=True)
+
+PROCESSED_FILES_LOG = os.path.join(STATE_DIR, 'processed_files.txt')
+FAILED_FILES_LOG = os.path.join(STATE_DIR, 'failed_files.txt')
+SKIPPED_FILES_LOG = os.path.join(STATE_DIR, 'skipped_files.txt')
 MAX_RETRIES = 10
 RETRY_WAIT_SECONDS = 30
 
