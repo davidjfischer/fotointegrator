@@ -17,6 +17,9 @@ processed_files.txt
 failed_files.txt
 skipped_files.txt
 
+# Log files directory
+logs/
+
 # Python
 __pycache__/
 *.py[cod]

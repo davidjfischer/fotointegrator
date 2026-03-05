@@ -6,20 +6,39 @@ import pickle
 import argparse
 import re
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from loguru import logger
 
+# Create logs directory if it doesn't exist
+LOGS_DIR = 'logs'
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+# Generate timestamped log filename
+start_time = datetime.now(timezone.utc)
+log_filename = os.path.join(LOGS_DIR, f"{start_time.strftime('%Y%m%d_%H%M%S_UTC')}_fotointegrator.log")
+
 # Configure loguru to use UTC time
 logger.remove()  # Remove default handler
 logger.configure(patcher=lambda record: record.update(time=record["time"].astimezone(timezone.utc)))
+
+# Add stdout handler (colorized)
 logger.add(
     sys.stdout,
     format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS UTC}</green> | <level>{level: <8}</level> | <level>{message}</level>",
-    level="INFO"
+    level="INFO",
+    colorize=True
+)
+
+# Add file handler (no color codes in file)
+logger.add(
+    log_filename,
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS UTC} | {level: <8} | {message}",
+    level="INFO",
+    colorize=False
 )
 
 # If modifying these scopes, delete the file token.pickle.
@@ -321,6 +340,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download photos/videos from Google Drive and upload to Google Photos')
     parser.add_argument('folder', help='Google Drive folder URL or folder ID')
     args = parser.parse_args()
+
+    logger.info(f"Fotointegrator started - Log file: {log_filename}")
 
     # Extract folder ID from URL if necessary
     folder_id = extract_folder_id(args.folder)
