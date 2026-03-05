@@ -1,0 +1,37 @@
+# Google API credentials and tokens
+credentials.json
+token.pickle
+
+# Downloaded media files
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.mov
+*.avi
+*.webm
+
+# Processed/failed file logs
+processed_files.txt
+failed_files.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
