@@ -140,7 +140,23 @@ def get_services():
             pickle.dump(creds, token)
 
     drive_service = build('drive', 'v3', credentials=creds)
-    return drive_service, creds.token
+    return drive_service, creds
+
+def get_valid_token(creds):
+    """
+    Get a valid access token from credentials, refreshing if necessary.
+    This should be called before each API request to ensure the token is fresh.
+    """
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            logger.info("  Token expired, refreshing...")
+            creds.refresh(Request())
+            # Update the pickled credentials
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(creds, token)
+        else:
+            raise Exception("Credentials are invalid and cannot be refreshed")
+    return creds.token
 
 def extract_folder_id(input_str):
     """Extract folder ID from Google Drive URL or return the input if it's already an ID."""
@@ -161,8 +177,9 @@ def get_folder_name(service, folder_id):
         logger.exception(f"Error getting folder name: {e}")
         return 'Untitled Folder'
 
-def get_or_create_album(token, album_title):
+def get_or_create_album(creds, album_title):
     """Get existing album ID or create a new album in Google Photos."""
+    token = get_valid_token(creds)
     headers = {
         'Content-type': 'application/json',
         'Authorization': f'Bearer {token}',
@@ -301,8 +318,11 @@ def convert_video_to_mp4(input_path, original_filename):
                 pass
         raise Exception(f"Video conversion failed: {str(e)}")
 
-def upload_to_photos(token, file_path, filename, album_id=None):
+def upload_to_photos(creds, file_path, filename, album_id=None):
     """Upload a file to Google Photos. Raises exception on failure."""
+    # Get a fresh token for this upload
+    token = get_valid_token(creds)
+
     # Step 1: Upload bytes to get an upload token
     upload_url = 'https://photoslibrary.googleapis.com/v1/uploads'
     headers = {
@@ -321,7 +341,8 @@ def upload_to_photos(token, file_path, filename, album_id=None):
 
     upload_token = response.text
 
-    # Step 2: Create media item in library
+    # Step 2: Create media item in library (refresh token again if needed)
+    token = get_valid_token(creds)
     create_url = 'https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate'
     headers = {
         'Content-type': 'application/json',
@@ -351,7 +372,7 @@ def upload_to_photos(token, file_path, filename, album_id=None):
 
     raise Exception(f"Failed to create media item (status {res.status_code}): {result}")
 
-def process_single_file_with_retry(service, token, file_id, file_name, album_id=None):
+def process_single_file_with_retry(service, creds, file_id, file_name, album_id=None):
     """
     Process a single file with retry logic.
     Returns (success: bool, error_message: str or None)
@@ -386,7 +407,7 @@ def process_single_file_with_retry(service, token, file_id, file_name, album_id=
 
             # Upload to Photos
             logger.info(f"  Uploading to Google Photos...")
-            upload_to_photos(token, file_to_upload, file_name, album_id)
+            upload_to_photos(creds, file_to_upload, file_name, album_id)
 
             # Success! Clean up and return
             if local_file and os.path.exists(local_file):
@@ -421,7 +442,7 @@ def process_single_file_with_retry(service, token, file_id, file_name, album_id=
     # All retries failed
     return False, last_error
 
-def process_folder(service, token, folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None):
+def process_folder(service, creds, folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None):
     if processed_files is None:
         processed_files = set()
     if failed_files is None:
@@ -435,7 +456,7 @@ def process_folder(service, token, folder_id, album_id=None, processed_files=Non
 
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            process_folder(service, token, item['id'], album_id, processed_files, failed_files, skipped_files)
+            process_folder(service, creds, item['id'], album_id, processed_files, failed_files, skipped_files)
         elif 'image' in item['mimeType'] or 'video' in item['mimeType']:
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
@@ -452,7 +473,7 @@ def process_folder(service, token, folder_id, album_id=None, processed_files=Non
 
             logger.info(f"Processing: {item['name']}...")
             success, error_msg = process_single_file_with_retry(
-                service, token, file_id, item['name'], album_id
+                service, creds, file_id, item['name'], album_id
             )
 
             if success:
@@ -497,16 +518,16 @@ if __name__ == '__main__':
         logger.info(f"Loaded {len(skipped_files)} previously skipped files")
 
         # Get services
-        drive_service, auth_token = get_services()
+        drive_service, creds = get_services()
 
         # Get folder name and create/get album
         folder_name = get_folder_name(drive_service, folder_id)
         logger.info(f"Folder name: {folder_name}")
 
-        album_id = get_or_create_album(auth_token, folder_name)
+        album_id = get_or_create_album(creds, folder_name)
 
         # Process folder and upload to album
-        process_folder(drive_service, auth_token, folder_id, album_id, processed_files, failed_files, skipped_files)
+        process_folder(drive_service, creds, folder_id, album_id, processed_files, failed_files, skipped_files)
 
         logger.info("Processing complete!")
         logger.info(f"Successfully processed: {len(processed_files)} files")
