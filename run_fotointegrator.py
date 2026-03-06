@@ -25,20 +25,24 @@ log_filename = os.path.join(LOGS_DIR, f"{start_time.strftime('%Y%m%d_%H%M%S_UTC'
 logger.remove()  # Remove default handler
 logger.configure(patcher=lambda record: record.update(time=record["time"].astimezone(timezone.utc)))
 
-# Add stdout handler (colorized)
+# Add stdout handler (colorized, with backtrace and diagnose for errors)
 logger.add(
     sys.stdout,
     format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS UTC}</green> | <level>{level: <8}</level> | <level>{message}</level>",
     level="INFO",
-    colorize=True
+    colorize=True,
+    backtrace=True,
+    diagnose=True
 )
 
-# Add file handler (no color codes in file)
+# Add file handler (no color codes in file, with backtrace and diagnose for errors)
 logger.add(
     log_filename,
     format="{time:YYYY-MM-DD HH:mm:ss.SSS UTC} | {level: <8} | {message}",
     level="INFO",
-    colorize=False
+    colorize=False,
+    backtrace=True,
+    diagnose=True
 )
 
 # If modifying these scopes, delete the file token.pickle.
@@ -149,7 +153,7 @@ def get_folder_name(service, folder_id):
         folder = service.files().get(fileId=folder_id, fields='name').execute()
         return folder.get('name', 'Untitled Folder')
     except Exception as e:
-        logger.error(f"Error getting folder name: {e}")
+        logger.exception(f"Error getting folder name: {e}")
         return 'Untitled Folder'
 
 def get_or_create_album(token, album_title):
@@ -284,7 +288,7 @@ def process_single_file_with_retry(service, token, file_id, file_name, album_id=
 
         except Exception as e:
             last_error = str(e)
-            logger.warning(f"  Attempt {attempt}/{MAX_RETRIES} failed: {last_error}")
+            logger.exception(f"  Attempt {attempt}/{MAX_RETRIES} failed: {last_error}")
 
             # Clean up local file if it exists
             if local_file and os.path.exists(local_file):
@@ -298,7 +302,7 @@ def process_single_file_with_retry(service, token, file_id, file_name, album_id=
                 logger.info(f"  Waiting {RETRY_WAIT_SECONDS} seconds before retry...")
                 time.sleep(RETRY_WAIT_SECONDS)
             else:
-                logger.error(f"  All {MAX_RETRIES} attempts failed")
+                logger.exception(f"  All {MAX_RETRIES} attempts failed")
 
     # All retries failed
     return False, last_error
@@ -359,38 +363,43 @@ def process_folder(service, token, folder_id, album_id=None, processed_files=Non
                 logger.info(f"Skipping (not image/video): {item['name']} (type: {item['mimeType']})")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Download photos/videos from Google Drive and upload to Google Photos')
-    parser.add_argument('folder', help='Google Drive folder URL or folder ID')
-    args = parser.parse_args()
+    try:
+        parser = argparse.ArgumentParser(description='Download photos/videos from Google Drive and upload to Google Photos')
+        parser.add_argument('folder', help='Google Drive folder URL or folder ID')
+        args = parser.parse_args()
 
-    logger.info(f"Fotointegrator started - Log file: {log_filename}")
+        logger.info(f"Fotointegrator started - Log file: {log_filename}")
 
-    # Extract folder ID from URL if necessary
-    folder_id = extract_folder_id(args.folder)
-    logger.info(f"Using folder ID: {folder_id}")
+        # Extract folder ID from URL if necessary
+        folder_id = extract_folder_id(args.folder)
+        logger.info(f"Using folder ID: {folder_id}")
 
-    # Load previously processed, failed, and skipped files
-    processed_files = load_processed_files()
-    failed_files = load_failed_files()
-    skipped_files = load_skipped_files()
-    logger.info(f"Loaded {len(processed_files)} previously processed files")
-    logger.info(f"Loaded {len(failed_files)} previously failed files")
-    logger.info(f"Loaded {len(skipped_files)} previously skipped files")
+        # Load previously processed, failed, and skipped files
+        processed_files = load_processed_files()
+        failed_files = load_failed_files()
+        skipped_files = load_skipped_files()
+        logger.info(f"Loaded {len(processed_files)} previously processed files")
+        logger.info(f"Loaded {len(failed_files)} previously failed files")
+        logger.info(f"Loaded {len(skipped_files)} previously skipped files")
 
-    # Get services
-    drive_service, auth_token = get_services()
+        # Get services
+        drive_service, auth_token = get_services()
 
-    # Get folder name and create/get album
-    folder_name = get_folder_name(drive_service, folder_id)
-    logger.info(f"Folder name: {folder_name}")
+        # Get folder name and create/get album
+        folder_name = get_folder_name(drive_service, folder_id)
+        logger.info(f"Folder name: {folder_name}")
 
-    album_id = get_or_create_album(auth_token, folder_name)
+        album_id = get_or_create_album(auth_token, folder_name)
 
-    # Process folder and upload to album
-    process_folder(drive_service, auth_token, folder_id, album_id, processed_files, failed_files, skipped_files)
+        # Process folder and upload to album
+        process_folder(drive_service, auth_token, folder_id, album_id, processed_files, failed_files, skipped_files)
 
-    logger.info("Processing complete!")
-    logger.info(f"Successfully processed: {len(processed_files)} files")
-    logger.info(f"Failed: {len(failed_files)} files")
-    logger.info(f"Skipped (non-image/video): {len(skipped_files)} files")
+        logger.info("Processing complete!")
+        logger.info(f"Successfully processed: {len(processed_files)} files")
+        logger.info(f"Failed: {len(failed_files)} files")
+        logger.info(f"Skipped (non-image/video): {len(skipped_files)} files")
+
+    except Exception as e:
+        logger.exception(f"Fatal error in main execution: {e}")
+        sys.exit(1)
 
