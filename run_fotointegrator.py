@@ -6,6 +6,8 @@ import pickle
 import argparse
 import re
 import time
+import subprocess
+import shutil
 from datetime import datetime, timezone
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -46,9 +48,12 @@ logger.add(
 )
 
 # If modifying these scopes, delete the file token.pickle.
+# Updated to use new scopes (legacy scopes deprecated after March 31, 2025)
 SCOPES = [
     'https://www.googleapis.com/auth/drive.readonly',
-    'https://www.googleapis.com/auth/photoslibrary'
+    'https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata',
+    'https://www.googleapis.com/auth/photoslibrary.appendonly',
+    'https://www.googleapis.com/auth/photoslibrary.edit.appcreateddata'
 ]
 
 # Create state directory for file tracking logs
@@ -215,6 +220,87 @@ def download_from_drive(service, file_id, file_name):
         status, done = downloader.next_chunk()
     return file_name
 
+def check_ffmpeg_installed():
+    """Check if ffmpeg is installed and available."""
+    return shutil.which('ffmpeg') is not None
+
+def should_convert_video(file_name):
+    """Check if video file should be converted to smaller format."""
+    # File extensions that typically have large file sizes
+    large_video_formats = ['.mts', '.m2ts', '.mod', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg', '.vob']
+    ext = os.path.splitext(file_name.lower())[1]
+    return ext in large_video_formats
+
+def convert_video_to_mp4(input_path, original_filename):
+    """
+    Convert video file to MP4 with H.264 encoding for smaller file size.
+    Returns the path to the converted file. Raises exception on failure.
+    """
+    if not check_ffmpeg_installed():
+        logger.warning("  ffmpeg not installed, skipping conversion (install with: brew install ffmpeg)")
+        return input_path
+
+    # Create output filename
+    base_name = os.path.splitext(input_path)[0]
+    output_path = f"{base_name}_converted.mp4"
+
+    original_size = os.path.getsize(input_path) / (1024 * 1024)  # MB
+    logger.info(f"  Converting {original_filename} ({original_size:.1f}MB) to MP4 using ffmpeg...")
+
+    try:
+        # FFmpeg command for good quality with reasonable file size
+        # -crf 23 is the default quality (lower = better, 18-28 is reasonable range)
+        # -preset medium balances speed and compression
+        # -movflags +faststart optimizes for streaming/web playback
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libx264',          # H.264 video codec
+            '-crf', '23',                # Quality level (18-28 recommended)
+            '-preset', 'medium',         # Encoding speed/compression balance
+            '-c:a', 'aac',               # AAC audio codec
+            '-b:a', '128k',              # Audio bitrate
+            '-movflags', '+faststart',   # Optimize for streaming
+            '-y',                        # Overwrite output file
+            output_path
+        ]
+
+        # Run ffmpeg
+        logger.info(f"  Running ffmpeg conversion (this may take several minutes)...")
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3600  # 1 hour timeout for very large files
+        )
+
+        if result.returncode != 0:
+            raise Exception(f"ffmpeg conversion failed: {result.stderr}")
+
+        # Check that output file was created and is not empty
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise Exception("Converted file is missing or empty")
+
+        # Log size reduction
+        converted_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
+        reduction_pct = ((original_size - converted_size) / original_size * 100) if original_size > 0 else 0
+
+        logger.success(f"  Conversion complete: {original_size:.1f}MB → {converted_size:.1f}MB ({reduction_pct:.1f}% reduction)")
+
+        return output_path
+
+    except subprocess.TimeoutExpired:
+        raise Exception("Video conversion timed out after 1 hour")
+    except Exception as e:
+        # Clean up partial output file if it exists
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        raise Exception(f"Video conversion failed: {str(e)}")
+
 def upload_to_photos(token, file_path, filename, album_id=None):
     """Upload a file to Google Photos. Raises exception on failure."""
     # Step 1: Upload bytes to get an upload token
@@ -271,29 +357,57 @@ def process_single_file_with_retry(service, token, file_id, file_name, album_id=
     Returns (success: bool, error_message: str or None)
     """
     local_file = None
+    converted_file = None
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             # Download from Drive
             local_file = download_from_drive(service, file_id, file_name)
+            download_size = os.path.getsize(local_file) / (1024 * 1024)  # MB
+            logger.info(f"  Downloaded: {download_size:.1f}MB")
+
+            # Check if video should be converted
+            file_to_upload = local_file
+            if should_convert_video(file_name):
+                logger.info(f"  Large video format detected, will convert to MP4")
+                try:
+                    converted_file = convert_video_to_mp4(local_file, file_name)
+                    if converted_file != local_file:
+                        file_to_upload = converted_file
+                        logger.info(f"  Using converted file for upload")
+                    else:
+                        file_to_upload = local_file
+                        logger.info(f"  Conversion skipped, using original file")
+                except Exception as conv_error:
+                    logger.warning(f"  Video conversion failed, uploading original: {conv_error}")
+                    # Continue with original file if conversion fails
+                    file_to_upload = local_file
 
             # Upload to Photos
-            upload_to_photos(token, local_file, file_name, album_id)
+            logger.info(f"  Uploading to Google Photos...")
+            upload_to_photos(token, file_to_upload, file_name, album_id)
 
             # Success! Clean up and return
             if local_file and os.path.exists(local_file):
                 os.remove(local_file)
+            if converted_file and os.path.exists(converted_file) and converted_file != local_file:
+                os.remove(converted_file)
             return True, None
 
         except Exception as e:
             last_error = str(e)
             logger.exception(f"  Attempt {attempt}/{MAX_RETRIES} failed: {last_error}")
 
-            # Clean up local file if it exists
+            # Clean up local files if they exist
             if local_file and os.path.exists(local_file):
                 try:
                     os.remove(local_file)
+                except:
+                    pass
+            if converted_file and os.path.exists(converted_file) and converted_file != local_file:
+                try:
+                    os.remove(converted_file)
                 except:
                     pass
 
