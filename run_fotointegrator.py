@@ -354,10 +354,139 @@ def check_ffmpeg_installed():
     return shutil.which('ffmpeg') is not None
 
 
+def check_ffprobe_installed():
+    """Check if ffprobe is installed and available."""
+    return shutil.which('ffprobe') is not None
+
+
+def video_has_audio_stream(file_path):
+    """
+    Check if a video file contains an audio stream using ffprobe.
+    Returns True if audio stream exists, False otherwise.
+    """
+    if not check_ffprobe_installed():
+        logger.warning("  ffprobe not installed, cannot check for audio stream")
+        return True  # Assume audio exists if we can't check
+
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=codec_type',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            file_path
+        ]
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30
+        )
+
+        # If output contains 'audio', then audio stream exists
+        return 'audio' in result.stdout.lower()
+
+    except Exception as e:
+        logger.warning(f"  Error checking audio stream: {e}")
+        return True  # Assume audio exists on error
+
+
+def combine_video_and_audio(video_path, audio_path, output_path):
+    """
+    Combine video file (without audio) and audio file into a single video file.
+    Uses ffmpeg to merge the streams.
+    Returns the output path on success, raises exception on failure.
+    """
+    if not check_ffmpeg_installed():
+        raise Exception("ffmpeg not installed, cannot combine video and audio")
+
+    logger.info(f"  Combining video and audio streams...")
+    logger.info(f"    Video: {os.path.basename(video_path)}")
+    logger.info(f"    Audio: {os.path.basename(audio_path)}")
+
+    try:
+        cmd = [
+            'ffmpeg',
+            '-i', video_path,
+            '-i', audio_path,
+            '-c:v', 'copy',  # Copy video stream without re-encoding
+            '-c:a', 'aac',   # Re-encode audio to AAC
+            '-b:a', AUDIO_BITRATE,
+            '-shortest',  # Match shortest stream duration
+            '-y',
+            output_path
+        ]
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3600
+        )
+
+        if result.returncode != 0:
+            raise Exception(f"ffmpeg merge failed: {result.stderr}")
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise Exception("Combined file is missing or empty")
+
+        combined_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
+        logger.success(f"  Successfully combined video+audio: {combined_size:.1f}MB")
+
+        return output_path
+
+    except subprocess.TimeoutExpired:
+        raise Exception("Video+audio combination timed out after 1 hour")
+    except Exception as e:
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        raise Exception(f"Failed to combine video and audio: {str(e)}")
+
+
 def should_convert_video(file_name):
     """Check if video file should be converted to smaller format."""
     ext = os.path.splitext(file_name.lower())[1]
     return ext in VIDEO_FORMATS_TO_CONVERT
+
+
+def find_matching_audio_file(service, folder_id, video_filename):
+    """
+    Search for an audio file with the same base name as the video file.
+    Returns (file_id, file_name) tuple if found, None otherwise.
+    """
+    base_name = os.path.splitext(video_filename)[0]
+    audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
+
+    logger.info(f"  Searching for matching audio file for: {base_name}")
+
+    try:
+        # Search for files with the same base name
+        query = f"'{folder_id}' in parents and trashed = false and name contains '{base_name}'"
+        results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
+        items = results.get('files', [])
+
+        for item in items:
+            item_base_name = os.path.splitext(item['name'])[0]
+            item_ext = os.path.splitext(item['name'].lower())[1]
+
+            # Check if it's an audio file with exact base name match
+            if item_base_name == base_name and (item_ext in audio_extensions or 'audio' in item.get('mimeType', '')):
+                logger.info(f"  Found matching audio file: {item['name']}")
+                return (item['id'], item['name'])
+
+        logger.info(f"  No matching audio file found")
+        return None
+
+    except Exception as e:
+        logger.warning(f"  Error searching for audio file: {e}")
+        return None
 
 
 # ============================================================================
@@ -498,7 +627,7 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
     raise Exception(f"Failed to create media item (status {res.status_code}): {result}")
 
 
-def process_single_file_with_retry(service, creds, file_id, file_name, album_id=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
+def process_single_file_with_retry(service, creds, file_id, file_name, folder_id, album_id=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
     """
     Process a single file with retry logic.
 
@@ -507,6 +636,7 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
         creds: Google credentials
         file_id: File ID to process
         file_name: Name of the file
+        folder_id: Google Drive folder ID (for searching matching audio files)
         album_id: Optional album ID to upload to
         max_retries: Maximum number of retry attempts (default: MAX_RETRIES)
         retry_wait_seconds: Seconds to wait between retries (default: RETRY_WAIT_SECONDS)
@@ -516,6 +646,8 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
     """
     local_file = None
     converted_file = None
+    combined_file = None
+    audio_file = None
     last_error = None
 
     for attempt in range(1, max_retries + 1):
@@ -533,6 +665,37 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
                 if local_file and os.path.exists(local_file):
                     os.remove(local_file)
                 return False, f"SKIP: File too small ({download_size_bytes} bytes, minimum: {min_bytes} bytes)"
+
+            # Check for video files without audio and combine with separate audio if found
+            file_ext = os.path.splitext(file_name.lower())[1]
+            if file_ext in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm']:
+                logger.info(f"  Checking for audio stream in video file...")
+                if not video_has_audio_stream(local_file):
+                    logger.warning(f"  Video file has no audio stream")
+                    # Search for matching audio file
+                    audio_match = find_matching_audio_file(service, folder_id, file_name)
+                    if audio_match:
+                        audio_file_id, audio_file_name = audio_match
+                        try:
+                            # Download the audio file
+                            logger.info(f"  Downloading matching audio file...")
+                            audio_file = download_from_drive(service, audio_file_id, audio_file_name)
+
+                            # Combine video and audio
+                            base_name = os.path.splitext(local_file)[0]
+                            combined_file = f"{base_name}_combined.mp4"
+                            combine_video_and_audio(local_file, audio_file, combined_file)
+
+                            # Use combined file for further processing
+                            local_file = combined_file
+                            logger.info(f"  Using combined video+audio file")
+                        except Exception as audio_error:
+                            logger.warning(f"  Failed to combine video+audio: {audio_error}")
+                            logger.info(f"  Will upload video without audio")
+                    else:
+                        logger.warning(f"  No matching audio file found, uploading video without audio")
+                else:
+                    logger.info(f"  Video has audio stream")
 
             # Convert if needed
             file_to_upload = local_file
@@ -559,6 +722,10 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
                 os.remove(local_file)
             if converted_file and os.path.exists(converted_file) and converted_file != local_file:
                 os.remove(converted_file)
+            if audio_file and os.path.exists(audio_file):
+                os.remove(audio_file)
+            if combined_file and os.path.exists(combined_file) and combined_file != local_file:
+                os.remove(combined_file)
             return True, None
 
         except Exception as e:
@@ -574,6 +741,16 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
             if converted_file and os.path.exists(converted_file) and converted_file != local_file:
                 try:
                     os.remove(converted_file)
+                except:
+                    pass
+            if audio_file and os.path.exists(audio_file):
+                try:
+                    os.remove(audio_file)
+                except:
+                    pass
+            if combined_file and os.path.exists(combined_file) and combined_file != local_file:
+                try:
+                    os.remove(combined_file)
                 except:
                     pass
 
@@ -654,7 +831,7 @@ def process_from_plan(service, creds, folder_id, planned_files, album_id, proces
 
         logger.info(f"[{idx}/{total_files}] Processing: {file_name}...")
         success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds, min_bytes
+            service, creds, file_id, file_name, folder_id, album_id, max_retries, retry_wait_seconds, min_bytes
         )
 
         if success:
@@ -712,7 +889,7 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
         logger.info(f"  Previous error: {old_error}")
 
         success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds, min_bytes
+            service, creds, file_id, file_name, folder_id, album_id, max_retries, retry_wait_seconds, min_bytes
         )
 
         if success:
@@ -773,7 +950,7 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
 
             logger.info(f"Processing: {item['name']}...")
             success, error_msg = process_single_file_with_retry(
-                service, creds, file_id, item['name'], album_id, max_retries, retry_wait_seconds, min_bytes
+                service, creds, file_id, item['name'], root_folder_id, album_id, max_retries, retry_wait_seconds, min_bytes
             )
 
             if success:

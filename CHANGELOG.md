@@ -1,5 +1,103 @@
 # Changelog
 
+## [2024-03-07] Automatic Video+Audio Stream Combination
+
+### Summary
+Added intelligent video+audio stream detection and automatic combination for videos without embedded audio.
+
+### New Functionality
+
+**Automatic Audio Detection:**
+- For video files (MP4, MOV, AVI, MKV, M4V, WebM), the script now checks if an audio stream is present
+- Uses ffprobe to detect audio streams in video files
+
+**Automatic Audio Matching:**
+- If a video has no audio stream, searches for a matching audio file with the same base name
+- Supports audio formats: MP3, M4A, AAC, WAV, WMA, OGG, FLAC
+- Example: `video.mp4` (no audio) → searches for `video.mp3`, `video.m4a`, etc.
+
+**Automatic Combination:**
+- Downloads both video and audio files
+- Uses ffmpeg to combine them into a single video file
+- Video stream is copied without re-encoding (fast)
+- Audio is re-encoded to AAC format
+- Uploads the combined video+audio file
+
+### Workflow
+
+1. **Download video file**
+2. **Check for audio stream** (using ffprobe)
+3. **If no audio found:**
+   - Search Google Drive folder for matching audio file (same base filename)
+   - Download audio file if found
+   - Combine video + audio using ffmpeg
+   - Use combined file for upload
+4. **If audio exists or no match found:**
+   - Continue with normal processing (upload video as-is)
+
+### Requirements
+
+- **ffprobe** - Required for audio stream detection (part of ffmpeg package)
+- **ffmpeg** - Required for combining video+audio streams
+
+Install on macOS: `brew install ffmpeg`
+Install on Linux: `apt-get install ffmpeg` or `yum install ffmpeg`
+
+### Use Cases
+
+**Solves the problem of:**
+- Videos exported without audio tracks
+- Separate video and audio file exports from recording software
+- Videos with corrupted or missing audio streams
+
+**Example scenarios:**
+- Screen recording software that exports video and audio separately
+- Video editing software that outputs separate tracks
+- Corrupted video files where audio was extracted to a separate file
+
+### Log Output Example
+
+```
+[25/100] Processing: recording.mp4...
+  Downloaded: 45.2MB
+  Checking for audio stream in video file...
+  Video file has no audio stream
+  Searching for matching audio file for: recording
+  Found matching audio file: recording.mp3
+  Downloading matching audio file...
+  Combining video and audio streams...
+    Video: recording.mp4
+    Audio: recording.mp3
+  Successfully combined video+audio: 47.8MB
+  Using combined video+audio file
+  Uploading to Google Photos...
+[25/100] Done: recording.mp4
+```
+
+### Implementation Details
+
+**New Functions:**
+- `check_ffprobe_installed()` - Checks if ffprobe is available
+- `video_has_audio_stream(file_path)` - Detects audio stream using ffprobe
+- `find_matching_audio_file(service, folder_id, video_filename)` - Searches for matching audio
+- `combine_video_and_audio(video_path, audio_path, output_path)` - Merges streams using ffmpeg
+
+**Updated Functions:**
+- `process_single_file_with_retry()` - Now accepts folder_id parameter and includes audio detection/combination logic
+
+### Error Handling
+
+- If ffprobe is not installed, assumes audio exists (no detection)
+- If audio file search fails, uploads video without audio
+- If combination fails, uploads original video without audio
+- All temporary files (audio, combined) are cleaned up after processing
+
+### Testing
+
+All 22 unit tests pass successfully.
+
+---
+
 ## [2024-03-07] Configurable Minimum File Size
 
 ### Summary
