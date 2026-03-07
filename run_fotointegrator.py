@@ -63,6 +63,7 @@ os.makedirs(STATE_DIR, exist_ok=True)
 PROCESSED_FILES_LOG = os.path.join(STATE_DIR, 'processed_files.txt')
 FAILED_FILES_LOG = os.path.join(STATE_DIR, 'failed_files.txt')
 SKIPPED_FILES_LOG = os.path.join(STATE_DIR, 'skipped_files.txt')
+PLANNED_FILES_LOG = os.path.join(STATE_DIR, 'planned_files.txt')
 MAX_RETRIES = 10
 RETRY_WAIT_SECONDS = 30
 
@@ -124,6 +125,11 @@ def save_skipped_file(file_id, file_url, mime_type):
     """Save a skipped file ID, its Drive URL, and MIME type to the log file."""
     with open(SKIPPED_FILES_LOG, 'a') as f:
         f.write(f"{file_id}|{file_url}|{mime_type}\n")
+
+def save_planned_file(file_id, file_url, file_name, mime_type):
+    """Save a planned file ID, URL, name, and MIME type to the plan file."""
+    with open(PLANNED_FILES_LOG, 'a') as f:
+        f.write(f"{file_id}|{file_url}|{file_name}|{mime_type}\n")
 
 def get_services():
     creds = None
@@ -442,6 +448,43 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
     # All retries failed
     return False, last_error
 
+def plan_folder(service, folder_id, planned_count=None):
+    """
+    Scan folder recursively and save all image/video files to planned_files.txt.
+    Returns the total count of files found.
+    """
+    if planned_count is None:
+        planned_count = {'images': 0, 'videos': 0, 'other': 0}
+
+    query = f"'{folder_id}' in parents and trashed = false"
+    results = service.files().list(q=query, fields="files(id, name, mimeType, webViewLink)").execute()
+    items = results.get('files', [])
+
+    for item in items:
+        if item['mimeType'] == 'application/vnd.google-apps.folder':
+            # Recursively scan subfolders
+            plan_folder(service, item['id'], planned_count)
+        elif 'image' in item['mimeType']:
+            # Found an image file
+            file_id = item['id']
+            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+            save_planned_file(file_id, file_url, item['name'], item['mimeType'])
+            planned_count['images'] += 1
+            logger.info(f"Found image: {item['name']}")
+        elif 'video' in item['mimeType']:
+            # Found a video file
+            file_id = item['id']
+            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+            save_planned_file(file_id, file_url, item['name'], item['mimeType'])
+            planned_count['videos'] += 1
+            logger.info(f"Found video: {item['name']}")
+        else:
+            # Non-image/video file
+            planned_count['other'] += 1
+            logger.debug(f"Skipping (not image/video): {item['name']} (type: {item['mimeType']})")
+
+    return planned_count
+
 def process_folder(service, creds, folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None):
     if processed_files is None:
         processed_files = set()
@@ -501,6 +544,8 @@ if __name__ == '__main__':
     try:
         parser = argparse.ArgumentParser(description='Download photos/videos from Google Drive and upload to Google Photos')
         parser.add_argument('folder', help='Google Drive folder URL or folder ID')
+        parser.add_argument('--plan', action='store_true',
+                          help='Scan folder and save list of files to planned_files.txt without processing')
         args = parser.parse_args()
 
         logger.info(f"Fotointegrator started - Log file: {log_filename}")
@@ -509,30 +554,50 @@ if __name__ == '__main__':
         folder_id = extract_folder_id(args.folder)
         logger.info(f"Using folder ID: {folder_id}")
 
-        # Load previously processed, failed, and skipped files
-        processed_files = load_processed_files()
-        failed_files = load_failed_files()
-        skipped_files = load_skipped_files()
-        logger.info(f"Loaded {len(processed_files)} previously processed files")
-        logger.info(f"Loaded {len(failed_files)} previously failed files")
-        logger.info(f"Loaded {len(skipped_files)} previously skipped files")
-
-        # Get services
+        # Get services (only Drive service needed for planning)
         drive_service, creds = get_services()
 
-        # Get folder name and create/get album
+        # Get folder name
         folder_name = get_folder_name(drive_service, folder_id)
         logger.info(f"Folder name: {folder_name}")
 
-        album_id = get_or_create_album(creds, folder_name)
+        if args.plan:
+            # Plan mode: scan and save file list without processing
+            logger.info("Running in PLAN mode - scanning folder structure...")
 
-        # Process folder and upload to album
-        process_folder(drive_service, creds, folder_id, album_id, processed_files, failed_files, skipped_files)
+            # Clear previous plan file
+            if os.path.exists(PLANNED_FILES_LOG):
+                os.remove(PLANNED_FILES_LOG)
+                logger.info(f"Cleared previous plan file: {PLANNED_FILES_LOG}")
 
-        logger.info("Processing complete!")
-        logger.info(f"Successfully processed: {len(processed_files)} files")
-        logger.info(f"Failed: {len(failed_files)} files")
-        logger.info(f"Skipped (non-image/video): {len(skipped_files)} files")
+            # Scan folder recursively
+            counts = plan_folder(drive_service, folder_id)
+
+            logger.info("Planning complete!")
+            logger.info(f"Found {counts['images']} image files")
+            logger.info(f"Found {counts['videos']} video files")
+            logger.info(f"Found {counts['other']} other files (skipped)")
+            logger.info(f"Plan saved to: {PLANNED_FILES_LOG}")
+        else:
+            # Normal processing mode
+            # Load previously processed, failed, and skipped files
+            processed_files = load_processed_files()
+            failed_files = load_failed_files()
+            skipped_files = load_skipped_files()
+            logger.info(f"Loaded {len(processed_files)} previously processed files")
+            logger.info(f"Loaded {len(failed_files)} previously failed files")
+            logger.info(f"Loaded {len(skipped_files)} previously skipped files")
+
+            # Create/get album
+            album_id = get_or_create_album(creds, folder_name)
+
+            # Process folder and upload to album
+            process_folder(drive_service, creds, folder_id, album_id, processed_files, failed_files, skipped_files)
+
+            logger.info("Processing complete!")
+            logger.info(f"Successfully processed: {len(processed_files)} files")
+            logger.info(f"Failed: {len(failed_files)} files")
+            logger.info(f"Skipped (non-image/video): {len(skipped_files)} files")
 
     except Exception as e:
         logger.exception(f"Fatal error in main execution: {e}")
