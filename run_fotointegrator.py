@@ -57,6 +57,9 @@ SCOPES = [
 MAX_RETRIES = 10
 RETRY_WAIT_SECONDS = 30
 
+# File size validation
+MIN_FILE_SIZE_BYTES = 100  # Default minimum file size in bytes
+
 # Video conversion
 VIDEO_FORMATS_TO_CONVERT = ['.mts', '.m2ts', '.mod', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg', '.vob']
 FFMPEG_CRF_QUALITY = '23'  # 18-28 recommended, 23 is default
@@ -495,7 +498,7 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
     raise Exception(f"Failed to create media item (status {res.status_code}): {result}")
 
 
-def process_single_file_with_retry(service, creds, file_id, file_name, album_id=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
+def process_single_file_with_retry(service, creds, file_id, file_name, album_id=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
     """
     Process a single file with retry logic.
 
@@ -507,6 +510,7 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
         album_id: Optional album ID to upload to
         max_retries: Maximum number of retry attempts (default: MAX_RETRIES)
         retry_wait_seconds: Seconds to wait between retries (default: RETRY_WAIT_SECONDS)
+        min_bytes: Minimum file size in bytes (default: MIN_FILE_SIZE_BYTES)
 
     Returns (success: bool, error_message: str or None)
     """
@@ -522,15 +526,13 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
             download_size = download_size_bytes / (1024 * 1024)
             logger.info(f"  Downloaded: {download_size:.1f}MB")
 
-            # Validate file size - skip zero-byte files
-            if download_size_bytes == 0:
-                logger.warning(f"  File is empty (0 bytes) - skipping (may be corrupted in Google Drive)")
+            # Validate file size - skip files below minimum threshold
+            if download_size_bytes < min_bytes:
+                logger.warning(f"  File is too small ({download_size_bytes} bytes, minimum: {min_bytes} bytes) - skipping")
                 # Cleanup and return skip indicator
                 if local_file and os.path.exists(local_file):
                     os.remove(local_file)
-                return False, "SKIP: File is empty (0 bytes)"
-            elif download_size_bytes < 100:
-                logger.warning(f"  File is very small ({download_size_bytes} bytes) - this may indicate corruption")
+                return False, f"SKIP: File too small ({download_size_bytes} bytes, minimum: {min_bytes} bytes)"
 
             # Convert if needed
             file_to_upload = local_file
@@ -630,7 +632,7 @@ def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
     return planned_count
 
 
-def process_from_plan(service, creds, folder_id, planned_files, album_id, processed_files, failed_files, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
+def process_from_plan(service, creds, folder_id, planned_files, album_id, processed_files, failed_files, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
     """Process files from the planned_files list."""
     total_files = len(planned_files)
     processed_count = 0
@@ -652,7 +654,7 @@ def process_from_plan(service, creds, folder_id, planned_files, album_id, proces
 
         logger.info(f"[{idx}/{total_files}] Processing: {file_name}...")
         success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds
+            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds, min_bytes
         )
 
         if success:
@@ -675,7 +677,7 @@ def process_from_plan(service, creds, folder_id, planned_files, album_id, proces
     return processed_count, failed_count, skipped_count
 
 
-def retry_failed_files(service, creds, folder_id, album_id, processed_files, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
+def retry_failed_files(service, creds, folder_id, album_id, processed_files, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
     """Retry processing files from the failed files log."""
     failed_files_list = load_failed_files_detailed(folder_id)
 
@@ -710,7 +712,7 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
         logger.info(f"  Previous error: {old_error}")
 
         success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds
+            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds, min_bytes
         )
 
         if success:
@@ -741,7 +743,7 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
     return success_count, still_failed_count
 
 
-def process_folder(service, creds, root_folder_id, current_folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
+def process_folder(service, creds, root_folder_id, current_folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
     """Process all files in a folder recursively (legacy mode)."""
     if processed_files is None:
         processed_files = set()
@@ -756,7 +758,7 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
 
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            process_folder(service, creds, root_folder_id, item['id'], album_id, processed_files, failed_files, skipped_files, max_retries, retry_wait_seconds)
+            process_folder(service, creds, root_folder_id, item['id'], album_id, processed_files, failed_files, skipped_files, max_retries, retry_wait_seconds, min_bytes)
         elif 'image' in item['mimeType'] or 'video' in item['mimeType']:
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
@@ -771,7 +773,7 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
 
             logger.info(f"Processing: {item['name']}...")
             success, error_msg = process_single_file_with_retry(
-                service, creds, file_id, item['name'], album_id, max_retries, retry_wait_seconds
+                service, creds, file_id, item['name'], album_id, max_retries, retry_wait_seconds, min_bytes
             )
 
             if success:
@@ -823,7 +825,7 @@ def run_retry_mode(args):
         return
 
     logger.info("Running in RETRY mode - retrying failed files...")
-    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait")
+    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait, {args.min_bytes} bytes minimum")
 
     failed_files_list = load_failed_files_detailed(folder_id)
     if not failed_files_list:
@@ -843,7 +845,7 @@ def run_retry_mode(args):
     album_id = get_or_create_album(creds, album_name)
 
     success_count, still_failed_count = retry_failed_files(
-        drive_service, creds, folder_id, album_id, processed_files, args.retry_on_error, args.wait_on_error
+        drive_service, creds, folder_id, album_id, processed_files, args.retry_on_error, args.wait_on_error, args.min_bytes
     )
 
     logger.info("Retry complete!")
@@ -873,7 +875,7 @@ def run_execute_mode(args):
         sys.exit(1)
 
     logger.info("Running in EXECUTE mode - processing files from plan...")
-    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait")
+    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait, {args.min_bytes} bytes minimum")
 
     planned_files = load_planned_files(folder_id)
     if not planned_files:
@@ -895,7 +897,7 @@ def run_execute_mode(args):
     album_id = get_or_create_album(creds, album_name)
 
     processed_count, failed_count, skipped_count = process_from_plan(
-        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files, args.retry_on_error, args.wait_on_error
+        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files, args.retry_on_error, args.wait_on_error, args.min_bytes
     )
 
     logger.info("Execution complete!")
@@ -959,7 +961,7 @@ def run_combined_mode(args):
     logger.info(f"Folder name: {folder_name}")
 
     logger.info("Running in COMBINED mode (plan + execute)...")
-    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait")
+    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait, {args.min_bytes} bytes minimum")
     logger.info("")
     logger.info(SEPARATOR_LINE)
     logger.info("STEP 1/2: PLANNING - Scanning folder structure...")
@@ -1004,7 +1006,7 @@ def run_combined_mode(args):
     album_id = get_or_create_album(creds, album_name)
 
     processed_count, failed_count, skipped_count = process_from_plan(
-        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files, args.retry_on_error, args.wait_on_error
+        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files, args.retry_on_error, args.wait_on_error, args.min_bytes
     )
 
     logger.info("")
@@ -1038,6 +1040,8 @@ def main():
                       help='Number of retry attempts when processing a file fails (default: 3)')
     parser.add_argument('--wait_on_error', type=int, default=30,
                       help='Number of seconds to wait between retry attempts (default: 30)')
+    parser.add_argument('--min_bytes', type=int, default=100,
+                      help='Minimum file size in bytes - files smaller will be skipped (default: 100)')
     args = parser.parse_args()
 
     logger.info("Fotointegrator started")

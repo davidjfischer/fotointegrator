@@ -1,5 +1,60 @@
 # Changelog
 
+## [2024-03-07] Configurable Minimum File Size
+
+### Summary
+Added `--min_bytes` parameter to configure the minimum file size threshold for skipping files.
+
+### New Parameter
+
+**`--min_bytes`** (integer, default: 100)
+- Specifies the minimum file size in bytes
+- Files smaller than this threshold are skipped (not failed)
+- Replaces hardcoded 0-byte check with configurable threshold
+
+### Usage Examples
+
+```bash
+# Use default (100 bytes minimum)
+python run_fotointegrator.py FOLDER_ID
+
+# Skip files smaller than 1 KB
+python run_fotointegrator.py FOLDER_ID --min_bytes 1024
+
+# Skip files smaller than 10 KB
+python run_fotointegrator.py FOLDER_ID --min_bytes 10240
+
+# Only skip zero-byte files
+python run_fotointegrator.py FOLDER_ID --min_bytes 1
+
+# Retry mode with custom minimum size
+python run_fotointegrator.py FOLDER_ID --retry --min_bytes 5000
+```
+
+### Implementation Details
+
+**Updated Functions:**
+- `process_single_file_with_retry()` - accepts `min_bytes` parameter
+- All mode handlers pass `args.min_bytes` through the call chain
+- Log messages show configured threshold
+
+**Behavior:**
+- Files below threshold are detected after download
+- Logged as: `"File is too small (X bytes, minimum: Y bytes) - skipping"`
+- Saved to `skipped_files.txt` with reason
+- Skip reason format: `"File too small (X bytes, minimum: Y bytes)"`
+
+**Why 100 bytes default?**
+- Reasonable threshold for image/video files
+- Catches corrupted files that download with minimal data
+- Can be adjusted per use case (0 for no minimum, 1024+ for stricter filtering)
+
+### Testing
+
+All 22 unit tests pass successfully.
+
+---
+
 ## [2024-03-07] Zero-Byte Files Now Skipped Instead of Failed
 
 ### Summary
