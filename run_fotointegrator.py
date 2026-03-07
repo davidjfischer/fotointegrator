@@ -203,10 +203,10 @@ def remove_from_failed_files(folder_id, file_id):
         f.writelines(lines_to_keep)
 
 
-def save_skipped_file(folder_id, file_id, file_url, mime_type):
+def save_skipped_file(folder_id, file_id, file_url, mime_type, reason="Not image/video"):
     """Save a skipped file to the log."""
     with open(get_skipped_files_log(folder_id), 'a') as f:
-        f.write(f"{file_id}|{file_url}|{mime_type}\n")
+        f.write(f"{file_id}|{file_url}|{mime_type}|{reason}\n")
 
 
 def save_planned_file(folder_id, file_id, file_url, file_name, mime_type):
@@ -522,9 +522,13 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
             download_size = download_size_bytes / (1024 * 1024)
             logger.info(f"  Downloaded: {download_size:.1f}MB")
 
-            # Validate file size
+            # Validate file size - skip zero-byte files
             if download_size_bytes == 0:
-                raise Exception("Downloaded file is empty (0 bytes) - file may be corrupted in Google Drive")
+                logger.warning(f"  File is empty (0 bytes) - skipping (may be corrupted in Google Drive)")
+                # Cleanup and return skip indicator
+                if local_file and os.path.exists(local_file):
+                    os.remove(local_file)
+                return False, "SKIP: File is empty (0 bytes)"
             elif download_size_bytes < 100:
                 logger.warning(f"  File is very small ({download_size_bytes} bytes) - this may indicate corruption")
 
@@ -656,6 +660,12 @@ def process_from_plan(service, creds, folder_id, planned_files, album_id, proces
             processed_files.add(file_id)
             processed_count += 1
             logger.success(f"[{idx}/{total_files}] Done: {file_name}")
+        elif error_msg and error_msg.startswith("SKIP:"):
+            # File should be skipped (e.g., zero bytes)
+            skip_reason = error_msg[5:].strip()  # Remove "SKIP:" prefix
+            save_skipped_file(folder_id, file_id, file_url, mime_type, skip_reason)
+            skipped_count += 1
+            logger.warning(f"[{idx}/{total_files}] Skipped: {file_name} - {skip_reason}")
         else:
             save_failed_file(folder_id, file_id, file_url, file_name, error_msg)
             failed_files.add(file_id)
@@ -709,6 +719,19 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
             processed_files.add(file_id)
             success_count += 1
             logger.success(f"[{idx}/{total_files}] Success on retry: {file_name}")
+        elif error_msg and error_msg.startswith("SKIP:"):
+            # File should be skipped (e.g., zero bytes)
+            skip_reason = error_msg[5:].strip()  # Remove "SKIP:" prefix
+            # Try to fetch mime type from Drive
+            try:
+                file_metadata = service.files().get(fileId=file_id, fields='mimeType').execute()
+                mime_type = file_metadata.get('mimeType', 'unknown')
+            except:
+                mime_type = 'unknown'
+            save_skipped_file(folder_id, file_id, file_url, mime_type, skip_reason)
+            remove_from_failed_files(folder_id, file_id)
+            success_count += 1
+            logger.warning(f"[{idx}/{total_files}] Skipped: {file_name} - {skip_reason}")
         else:
             remove_from_failed_files(folder_id, file_id)
             save_failed_file(folder_id, file_id, file_url, file_name, error_msg)
@@ -755,6 +778,12 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
                 save_processed_file(root_folder_id, file_id, file_url)
                 processed_files.add(file_id)
                 logger.success(f"Done: {item['name']}")
+            elif error_msg and error_msg.startswith("SKIP:"):
+                # File should be skipped (e.g., zero bytes)
+                skip_reason = error_msg[5:].strip()  # Remove "SKIP:" prefix
+                save_skipped_file(root_folder_id, file_id, file_url, item['mimeType'], skip_reason)
+                skipped_files.add(file_id)
+                logger.warning(f"Skipped: {item['name']} - {skip_reason}")
             else:
                 save_failed_file(root_folder_id, file_id, file_url, item['name'], error_msg)
                 failed_files.add(file_id)

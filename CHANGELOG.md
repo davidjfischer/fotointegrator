@@ -1,5 +1,46 @@
 # Changelog
 
+## [2024-03-07] Zero-Byte Files Now Skipped Instead of Failed
+
+### Summary
+Zero-byte (empty) files are now treated as skipped files rather than failed files.
+
+### Changes
+
+**New Behavior:**
+- Files that download as 0 bytes are automatically skipped
+- These files are saved to `{FOLDER_ID}_skipped_files.txt` instead of `{FOLDER_ID}_failed_files.txt`
+- Skip reason is included in the log: `File is empty (0 bytes)`
+
+**Updated File Format:**
+The skipped files log now includes a reason field:
+```
+file_id|file_url|mime_type|reason
+```
+
+**Example entries:**
+```
+1a2b3c4d5e|https://drive.google.com/file/d/1a2b3c4d5e|image/jpeg|File is empty (0 bytes)
+9x8y7z6w5v|https://drive.google.com/file/d/9x8y7z6w5v|video/mp4|Not image/video
+```
+
+**Benefits:**
+- ✅ Failed files list is cleaner (only contains actual processing failures)
+- ✅ Empty/corrupted files are properly categorized as skipped
+- ✅ Easy to identify zero-byte files in the skipped files log
+- ✅ Retry mode won't keep retrying files that are permanently empty
+
+**Implementation:**
+- `process_single_file_with_retry()` returns `(False, "SKIP: reason")` for zero-byte files
+- All mode handlers check for "SKIP:" prefix and save to skipped files accordingly
+- `save_skipped_file()` now accepts optional `reason` parameter (default: "Not image/video")
+
+### Testing
+
+All 22 unit tests pass successfully.
+
+---
+
 ## [2024-03-07] Improved Error Handling for Corrupted Files
 
 ### Summary
