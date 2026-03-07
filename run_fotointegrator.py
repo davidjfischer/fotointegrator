@@ -481,7 +481,16 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
         if status.get('message') == 'Success' or not status:
             return True
         else:
-            raise Exception(f"Media item creation failed: {status}")
+            error_code = status.get('code', 'unknown')
+            error_msg = status.get('message', 'unknown error')
+
+            # Provide helpful context for common error codes
+            if error_code == 3:
+                hint = " (Possible causes: corrupted/empty file, unsupported format, or invalid upload token)"
+            else:
+                hint = ""
+
+            raise Exception(f"Media item creation failed: code={error_code}, message='{error_msg}'{hint}")
 
     raise Exception(f"Failed to create media item (status {res.status_code}): {result}")
 
@@ -509,8 +518,15 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
         try:
             # Download
             local_file = download_from_drive(service, file_id, file_name)
-            download_size = os.path.getsize(local_file) / (1024 * 1024)
+            download_size_bytes = os.path.getsize(local_file)
+            download_size = download_size_bytes / (1024 * 1024)
             logger.info(f"  Downloaded: {download_size:.1f}MB")
+
+            # Validate file size
+            if download_size_bytes == 0:
+                raise Exception("Downloaded file is empty (0 bytes) - file may be corrupted in Google Drive")
+            elif download_size_bytes < 100:
+                logger.warning(f"  File is very small ({download_size_bytes} bytes) - this may indicate corruption")
 
             # Convert if needed
             file_to_upload = local_file

@@ -1,5 +1,44 @@
 # Changelog
 
+## [2024-03-07] Improved Error Handling for Corrupted Files
+
+### Summary
+Enhanced error detection and reporting for empty or corrupted files.
+
+### Changes
+
+**Empty File Detection:**
+- Added validation after download to detect 0-byte files
+- Files with 0 bytes are immediately rejected with clear error message
+- Prevents confusing Google Photos API errors for empty files
+
+**Small File Warning:**
+- Added warning for suspiciously small files (< 100 bytes)
+- Helps identify potentially corrupted files early
+
+**Improved Error Messages:**
+- Google Photos API errors now include error code and clearer messages
+- Code 3 errors (INVALID_ARGUMENT) now include helpful hints:
+  - "Possible causes: corrupted/empty file, unsupported format, or invalid upload token"
+
+### Problem This Solves
+
+Previously, when a file downloaded as 0 bytes (corrupted in Google Drive), the upload to Google Photos would fail with a cryptic error:
+```
+Media item creation failed: {'code': 3, 'message': 'Failed: There was an error while trying to create this media item.'}
+```
+
+Now, the script detects this early and provides a clear error:
+```
+Downloaded file is empty (0 bytes) - file may be corrupted in Google Drive
+```
+
+### Testing
+
+All 22 unit tests pass successfully.
+
+---
+
 ## [2024-03-07] Configurable Retry Parameters
 
 ### Summary
