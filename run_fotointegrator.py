@@ -603,12 +603,14 @@ def process_folder(service, creds, folder_id, album_id=None, processed_files=Non
 
 if __name__ == '__main__':
     try:
-        parser = argparse.ArgumentParser(description='Download photos/videos from Google Drive and upload to Google Photos')
-        parser.add_argument('folder', nargs='?', help='Google Drive folder URL or folder ID (required for --plan mode)')
+        parser = argparse.ArgumentParser(
+            description='Download photos/videos from Google Drive and upload to Google Photos',
+            epilog='Default behavior (no flags): Run plan + execute sequentially')
+        parser.add_argument('folder', nargs='?', help='Google Drive folder URL or folder ID')
         parser.add_argument('--plan', action='store_true',
-                          help='Scan folder and save list of files to planned_files.txt without processing')
+                          help='PLAN ONLY: Scan folder and save list of files to planned_files.txt without processing')
         parser.add_argument('--execute', action='store_true',
-                          help='Process files from planned_files.txt (must run --plan first)')
+                          help='EXECUTE ONLY: Process files from planned_files.txt (must run --plan first)')
         parser.add_argument('--album', type=str, default=None,
                           help='Album name for Google Photos (default: FOTO for --execute, folder name for other modes)')
         args = parser.parse_args()
@@ -694,9 +696,9 @@ if __name__ == '__main__':
             logger.info(f"Found {counts['other']} other files (skipped)")
             logger.info(f"Plan saved to: {PLANNED_FILES_LOG}")
         else:
-            # Normal processing mode
+            # Default mode: run both plan and execute sequentially
             if not args.folder:
-                logger.error("Folder argument is required for normal processing mode")
+                logger.error("Folder argument is required")
                 logger.error(f"Example: python {sys.argv[0]} FOLDER_ID")
                 sys.exit(1)
 
@@ -711,13 +713,47 @@ if __name__ == '__main__':
             folder_name = get_folder_name(drive_service, folder_id)
             logger.info(f"Folder name: {folder_name}")
 
-            # Load previously processed, failed, and skipped files
+            logger.info("Running in COMBINED mode (plan + execute)...")
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("STEP 1/2: PLANNING - Scanning folder structure...")
+            logger.info("=" * 70)
+            logger.info("")
+
+            # Clear previous plan file
+            if os.path.exists(PLANNED_FILES_LOG):
+                os.remove(PLANNED_FILES_LOG)
+                logger.info(f"Cleared previous plan file: {PLANNED_FILES_LOG}")
+
+            # Scan folder recursively
+            counts = plan_folder(drive_service, folder_id)
+
+            logger.info("")
+            logger.info("Planning complete!")
+            logger.info(f"Found {counts['images']} image files")
+            logger.info(f"Found {counts['videos']} video files")
+            logger.info(f"Found {counts['other']} other files (skipped)")
+            logger.info(f"Plan saved to: {PLANNED_FILES_LOG}")
+
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("STEP 2/2: EXECUTING - Processing files from plan...")
+            logger.info("=" * 70)
+            logger.info("")
+
+            # Load the plan we just created
+            planned_files = load_planned_files()
+            if not planned_files:
+                logger.error("Failed to load planned files")
+                sys.exit(1)
+
+            logger.info(f"Loaded {len(planned_files)} files from plan")
+
+            # Load previously processed and failed files
             processed_files = load_processed_files()
             failed_files = load_failed_files()
-            skipped_files = load_skipped_files()
             logger.info(f"Loaded {len(processed_files)} previously processed files")
             logger.info(f"Loaded {len(failed_files)} previously failed files")
-            logger.info(f"Loaded {len(skipped_files)} previously skipped files")
 
             # Determine album name (use --album if provided, otherwise folder name)
             album_name = args.album if args.album else folder_name
@@ -726,13 +762,18 @@ if __name__ == '__main__':
             # Create/get album
             album_id = get_or_create_album(creds, album_name)
 
-            # Process folder and upload to album
-            process_folder(drive_service, creds, folder_id, album_id, processed_files, failed_files, skipped_files)
+            # Process files from plan
+            processed_count, failed_count, skipped_count = process_from_plan(
+                drive_service, creds, planned_files, album_id, processed_files, failed_files
+            )
 
-            logger.info("Processing complete!")
-            logger.info(f"Successfully processed: {len(processed_files)} files")
-            logger.info(f"Failed: {len(failed_files)} files")
-            logger.info(f"Skipped (non-image/video): {len(skipped_files)} files")
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("ALL STEPS COMPLETE!")
+            logger.info("=" * 70)
+            logger.info(f"Successfully processed: {processed_count} files")
+            logger.info(f"Failed: {failed_count} files")
+            logger.info(f"Skipped (already processed/failed): {skipped_count} files")
 
     except Exception as e:
         logger.exception(f"Fatal error in main execution: {e}")
