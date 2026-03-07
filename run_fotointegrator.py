@@ -94,18 +94,57 @@ def load_failed_files():
     failed = set()
     with open(FAILED_FILES_LOG, 'r') as f:
         for line in f:
-            # Extract file ID from each line (format: file_id|url|error)
+            # Extract file ID from each line (format: file_id|url|filename|error)
             parts = line.strip().split('|')
             if parts:
                 failed.add(parts[0])
     return failed
 
-def save_failed_file(file_id, file_url, error_msg):
-    """Save a failed file ID, its Drive URL, and error message to the log file."""
+def load_failed_files_detailed():
+    """
+    Load failed files with full details from the log file.
+    Returns a list of tuples: (file_id, file_url, file_name, error_msg)
+    """
+    if not os.path.exists(FAILED_FILES_LOG):
+        return []
+
+    failed = []
+    with open(FAILED_FILES_LOG, 'r') as f:
+        for line in f:
+            parts = line.strip().split('|')
+            if len(parts) >= 4:
+                file_id, file_url, file_name, error_msg = parts[0], parts[1], parts[2], '|'.join(parts[3:])
+                failed.append((file_id, file_url, file_name, error_msg))
+            elif len(parts) == 3:
+                # Old format without filename - extract from URL or use placeholder
+                file_id, file_url, error_msg = parts[0], parts[1], parts[2]
+                file_name = f"unknown_{file_id}"
+                failed.append((file_id, file_url, file_name, error_msg))
+    return failed
+
+def save_failed_file(file_id, file_url, file_name, error_msg):
+    """Save a failed file ID, its Drive URL, filename, and error message to the log file."""
     with open(FAILED_FILES_LOG, 'a') as f:
         # Replace newlines and pipes in error message to keep format consistent
         error_msg_cleaned = error_msg.replace('\n', ' ').replace('|', ':')
-        f.write(f"{file_id}|{file_url}|{error_msg_cleaned}\n")
+        f.write(f"{file_id}|{file_url}|{file_name}|{error_msg_cleaned}\n")
+
+def remove_from_failed_files(file_id):
+    """Remove a file from the failed files log."""
+    if not os.path.exists(FAILED_FILES_LOG):
+        return
+
+    # Read all lines except the one with this file_id
+    lines_to_keep = []
+    with open(FAILED_FILES_LOG, 'r') as f:
+        for line in f:
+            parts = line.strip().split('|')
+            if parts and parts[0] != file_id:
+                lines_to_keep.append(line)
+
+    # Write back the filtered lines
+    with open(FAILED_FILES_LOG, 'w') as f:
+        f.writelines(lines_to_keep)
 
 def load_skipped_files():
     """Load the set of skipped file IDs from the log file."""
@@ -539,12 +578,70 @@ def process_from_plan(service, creds, planned_files, album_id, processed_files, 
             logger.success(f"[{idx}/{total_files}] Done: {file_name}")
         else:
             # Save to failed files log
-            save_failed_file(file_id, file_url, error_msg)
+            save_failed_file(file_id, file_url, file_name, error_msg)
             failed_files.add(file_id)
             failed_count += 1
             logger.error(f"[{idx}/{total_files}] Failed permanently: {file_name}")
 
     return processed_count, failed_count, skipped_count
+
+def retry_failed_files(service, creds, album_id, processed_files):
+    """
+    Retry processing files from the failed files log.
+    Returns (success_count, still_failed_count)
+    """
+    # Load failed files with details
+    failed_files_list = load_failed_files_detailed()
+
+    if not failed_files_list:
+        logger.warning("No failed files to retry")
+        return 0, 0
+
+    total_files = len(failed_files_list)
+    success_count = 0
+    still_failed_count = 0
+
+    logger.info(f"Retrying {total_files} failed files...")
+
+    for idx, (file_id, file_url, file_name, old_error) in enumerate(failed_files_list, 1):
+        # If filename is unknown (old format), try to fetch it from Drive API
+        if file_name.startswith('unknown_'):
+            try:
+                file_metadata = service.files().get(fileId=file_id, fields='name').execute()
+                file_name = file_metadata.get('name', file_name)
+                logger.debug(f"Fetched filename from Drive: {file_name}")
+            except Exception as e:
+                logger.warning(f"Could not fetch filename for {file_id}: {e}")
+                # Keep the placeholder name
+        # Check if already processed (in case of duplicates)
+        if file_id in processed_files:
+            logger.info(f"[{idx}/{total_files}] Skipping (already processed): {file_name}")
+            remove_from_failed_files(file_id)
+            success_count += 1
+            continue
+
+        logger.info(f"[{idx}/{total_files}] Retrying: {file_name}")
+        logger.info(f"  Previous error: {old_error}")
+
+        success, error_msg = process_single_file_with_retry(
+            service, creds, file_id, file_name, album_id
+        )
+
+        if success:
+            # Success! Move from failed to processed
+            save_processed_file(file_id, file_url)
+            remove_from_failed_files(file_id)
+            processed_files.add(file_id)
+            success_count += 1
+            logger.success(f"[{idx}/{total_files}] Success on retry: {file_name}")
+        else:
+            # Still failed - update the error message in failed log
+            remove_from_failed_files(file_id)
+            save_failed_file(file_id, file_url, file_name, error_msg)
+            still_failed_count += 1
+            logger.error(f"[{idx}/{total_files}] Still failing: {file_name}")
+
+    return success_count, still_failed_count
 
 def process_folder(service, creds, folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None):
     if processed_files is None:
@@ -587,7 +684,7 @@ def process_folder(service, creds, folder_id, album_id=None, processed_files=Non
                 logger.success(f"Done: {item['name']}")
             else:
                 # Save to failed files log
-                save_failed_file(file_id, file_url, error_msg)
+                save_failed_file(file_id, file_url, item['name'], error_msg)
                 failed_files.add(file_id)
                 logger.error(f"Failed permanently: {item['name']}")
         else:
@@ -611,6 +708,8 @@ if __name__ == '__main__':
                           help='PLAN ONLY: Scan folder and save list of files to planned_files.txt without processing')
         parser.add_argument('--execute', action='store_true',
                           help='EXECUTE ONLY: Process files from planned_files.txt (must run --plan first)')
+        parser.add_argument('--retry', action='store_true',
+                          help='RETRY ONLY: Retry processing files from failed_files.txt')
         parser.add_argument('--album', type=str, default=None,
                           help='Album name for Google Photos (default: FOTO for --execute, folder name for other modes)')
         args = parser.parse_args()
@@ -618,7 +717,47 @@ if __name__ == '__main__':
         logger.info(f"Fotointegrator started - Log file: {log_filename}")
 
         # Validate argument combinations
-        if args.execute:
+        if args.retry:
+            # Retry mode: retry failed files
+            if not os.path.exists(FAILED_FILES_LOG):
+                logger.warning(f"Failed files log not found: {FAILED_FILES_LOG}")
+                logger.info("No failed files to retry")
+                sys.exit(0)
+
+            logger.info("Running in RETRY mode - retrying failed files...")
+
+            # Load failed files
+            failed_files_list = load_failed_files_detailed()
+            if not failed_files_list:
+                logger.info("No failed files to retry")
+                sys.exit(0)
+
+            logger.info(f"Found {len(failed_files_list)} failed files to retry")
+
+            # Load previously processed files
+            processed_files = load_processed_files()
+            logger.info(f"Loaded {len(processed_files)} previously processed files")
+
+            # Get services
+            drive_service, creds = get_services()
+
+            # Determine album name
+            album_name = args.album if args.album else 'FOTO'
+            logger.info(f"Using album name: {album_name}")
+
+            # Create/get album
+            album_id = get_or_create_album(creds, album_name)
+
+            # Retry failed files
+            success_count, still_failed_count = retry_failed_files(
+                drive_service, creds, album_id, processed_files
+            )
+
+            logger.info("Retry complete!")
+            logger.info(f"Successfully processed on retry: {success_count} files")
+            logger.info(f"Still failing: {still_failed_count} files")
+
+        elif args.execute:
             # Execute mode: process from plan file
             if not os.path.exists(PLANNED_FILES_LOG):
                 logger.error(f"Plan file not found: {PLANNED_FILES_LOG}")
