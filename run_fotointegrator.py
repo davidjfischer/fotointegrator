@@ -15,19 +15,60 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from loguru import logger
 
-# Create logs directory if it doesn't exist
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Directories
 LOGS_DIR = 'logs'
+STATE_DIR = 'state'
+
+# Log files
+PROCESSED_FILES_LOG = os.path.join(STATE_DIR, 'processed_files.txt')
+FAILED_FILES_LOG = os.path.join(STATE_DIR, 'failed_files.txt')
+SKIPPED_FILES_LOG = os.path.join(STATE_DIR, 'skipped_files.txt')
+PLANNED_FILES_LOG = os.path.join(STATE_DIR, 'planned_files.txt')
+
+# OAuth Scopes (updated for post-March 31, 2025)
+SCOPES = [
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata',
+    'https://www.googleapis.com/auth/photoslibrary.appendonly',
+    'https://www.googleapis.com/auth/photoslibrary.edit.appcreateddata'
+]
+
+# Retry configuration
+MAX_RETRIES = 10
+RETRY_WAIT_SECONDS = 30
+
+# Video conversion
+VIDEO_FORMATS_TO_CONVERT = ['.mts', '.m2ts', '.mod', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg', '.vob']
+FFMPEG_CRF_QUALITY = '23'  # 18-28 recommended, 23 is default
+FFMPEG_PRESET = 'medium'
+AUDIO_BITRATE = '128k'
+
+# Default album name
+DEFAULT_ALBUM_NAME = 'FOTO'
+
+# UI separators
+SEPARATOR_LINE = "=" * 70
+
+# ============================================================================
+# INITIALIZATION
+# ============================================================================
+
+# Create directories
 os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(STATE_DIR, exist_ok=True)
 
 # Generate timestamped log filename
 start_time = datetime.now(timezone.utc)
 log_filename = os.path.join(LOGS_DIR, f"{start_time.strftime('%Y%m%d_%H%M%S_UTC')}_fotointegrator.log")
 
-# Configure loguru to use UTC time
-logger.remove()  # Remove default handler
+# Configure loguru
+logger.remove()
 logger.configure(patcher=lambda record: record.update(time=record["time"].astimezone(timezone.utc)))
 
-# Add stdout handler (colorized, with backtrace and diagnose for errors)
 logger.add(
     sys.stdout,
     format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS UTC}</green> | <level>{level: <8}</level> | <level>{message}</level>",
@@ -37,7 +78,6 @@ logger.add(
     diagnose=True
 )
 
-# Add file handler (no color codes in file, with backtrace and diagnose for errors)
 logger.add(
     log_filename,
     format="{time:YYYY-MM-DD HH:mm:ss.SSS UTC} | {level: <8} | {message}",
@@ -47,58 +87,53 @@ logger.add(
     diagnose=True
 )
 
-# If modifying these scopes, delete the file token.pickle.
-# Updated to use new scopes (legacy scopes deprecated after March 31, 2025)
-SCOPES = [
-    'https://www.googleapis.com/auth/drive.readonly',
-    'https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata',
-    'https://www.googleapis.com/auth/photoslibrary.appendonly',
-    'https://www.googleapis.com/auth/photoslibrary.edit.appcreateddata'
-]
+# ============================================================================
+# FILE TRACKING FUNCTIONS
+# ============================================================================
 
-# Create state directory for file tracking logs
-STATE_DIR = 'state'
-os.makedirs(STATE_DIR, exist_ok=True)
+def _load_file_ids_from_log(log_file, description="files"):
+    """
+    Generic function to load file IDs from a log file.
 
-PROCESSED_FILES_LOG = os.path.join(STATE_DIR, 'processed_files.txt')
-FAILED_FILES_LOG = os.path.join(STATE_DIR, 'failed_files.txt')
-SKIPPED_FILES_LOG = os.path.join(STATE_DIR, 'skipped_files.txt')
-PLANNED_FILES_LOG = os.path.join(STATE_DIR, 'planned_files.txt')
-MAX_RETRIES = 10
-RETRY_WAIT_SECONDS = 30
+    Args:
+        log_file: Path to the log file
+        description: Description for logging purposes
 
-def load_processed_files():
-    """Load the set of already processed file IDs from the log file."""
-    if not os.path.exists(PROCESSED_FILES_LOG):
+    Returns:
+        Set of file IDs
+    """
+    if not os.path.exists(log_file):
         return set()
 
-    processed = set()
-    with open(PROCESSED_FILES_LOG, 'r') as f:
+    file_ids = set()
+    with open(log_file, 'r') as f:
         for line in f:
-            # Extract file ID from each line (format: file_id|url)
             parts = line.strip().split('|')
             if parts:
-                processed.add(parts[0])
-    return processed
+                file_ids.add(parts[0])
+    return file_ids
+
+
+def load_processed_files():
+    """Load the set of already processed file IDs."""
+    return _load_file_ids_from_log(PROCESSED_FILES_LOG, "processed")
+
+
+def load_failed_files():
+    """Load the set of failed file IDs."""
+    return _load_file_ids_from_log(FAILED_FILES_LOG, "failed")
+
+
+def load_skipped_files():
+    """Load the set of skipped file IDs."""
+    return _load_file_ids_from_log(SKIPPED_FILES_LOG, "skipped")
+
 
 def save_processed_file(file_id, file_url):
     """Save a processed file ID and its Drive URL to the log file."""
     with open(PROCESSED_FILES_LOG, 'a') as f:
         f.write(f"{file_id}|{file_url}\n")
 
-def load_failed_files():
-    """Load the set of failed file IDs from the log file."""
-    if not os.path.exists(FAILED_FILES_LOG):
-        return set()
-
-    failed = set()
-    with open(FAILED_FILES_LOG, 'r') as f:
-        for line in f:
-            # Extract file ID from each line (format: file_id|url|filename|error)
-            parts = line.strip().split('|')
-            if parts:
-                failed.add(parts[0])
-    return failed
 
 def load_failed_files_detailed():
     """
@@ -116,25 +151,25 @@ def load_failed_files_detailed():
                 file_id, file_url, file_name, error_msg = parts[0], parts[1], parts[2], '|'.join(parts[3:])
                 failed.append((file_id, file_url, file_name, error_msg))
             elif len(parts) == 3:
-                # Old format without filename - extract from URL or use placeholder
+                # Old format without filename - use placeholder
                 file_id, file_url, error_msg = parts[0], parts[1], parts[2]
                 file_name = f"unknown_{file_id}"
                 failed.append((file_id, file_url, file_name, error_msg))
     return failed
 
+
 def save_failed_file(file_id, file_url, file_name, error_msg):
-    """Save a failed file ID, its Drive URL, filename, and error message to the log file."""
+    """Save a failed file to the log."""
     with open(FAILED_FILES_LOG, 'a') as f:
-        # Replace newlines and pipes in error message to keep format consistent
         error_msg_cleaned = error_msg.replace('\n', ' ').replace('|', ':')
         f.write(f"{file_id}|{file_url}|{file_name}|{error_msg_cleaned}\n")
+
 
 def remove_from_failed_files(file_id):
     """Remove a file from the failed files log."""
     if not os.path.exists(FAILED_FILES_LOG):
         return
 
-    # Read all lines except the one with this file_id
     lines_to_keep = []
     with open(FAILED_FILES_LOG, 'r') as f:
         for line in f:
@@ -142,33 +177,21 @@ def remove_from_failed_files(file_id):
             if parts and parts[0] != file_id:
                 lines_to_keep.append(line)
 
-    # Write back the filtered lines
     with open(FAILED_FILES_LOG, 'w') as f:
         f.writelines(lines_to_keep)
 
-def load_skipped_files():
-    """Load the set of skipped file IDs from the log file."""
-    if not os.path.exists(SKIPPED_FILES_LOG):
-        return set()
-
-    skipped = set()
-    with open(SKIPPED_FILES_LOG, 'r') as f:
-        for line in f:
-            # Extract file ID from each line (format: file_id|url|mimetype)
-            parts = line.strip().split('|')
-            if parts:
-                skipped.add(parts[0])
-    return skipped
 
 def save_skipped_file(file_id, file_url, mime_type):
-    """Save a skipped file ID, its Drive URL, and MIME type to the log file."""
+    """Save a skipped file to the log."""
     with open(SKIPPED_FILES_LOG, 'a') as f:
         f.write(f"{file_id}|{file_url}|{mime_type}\n")
 
+
 def save_planned_file(file_id, file_url, file_name, mime_type):
-    """Save a planned file ID, URL, name, and MIME type to the plan file."""
+    """Save a planned file to the plan file."""
     with open(PLANNED_FILES_LOG, 'a') as f:
         f.write(f"{file_id}|{file_url}|{file_name}|{mime_type}\n")
+
 
 def load_planned_files():
     """
@@ -187,11 +210,18 @@ def load_planned_files():
                 planned.append((file_id, file_url, file_name, mime_type))
     return planned
 
+
+# ============================================================================
+# GOOGLE API FUNCTIONS
+# ============================================================================
+
 def get_services():
+    """Initialize and return Google Drive service and credentials."""
     creds = None
     if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -204,6 +234,7 @@ def get_services():
     drive_service = build('drive', 'v3', credentials=creds)
     return drive_service, creds
 
+
 def get_valid_token(creds):
     """
     Get a valid access token from credentials, refreshing if necessary.
@@ -213,22 +244,12 @@ def get_valid_token(creds):
         if creds.expired and creds.refresh_token:
             logger.info("  Token expired, refreshing...")
             creds.refresh(Request())
-            # Update the pickled credentials
             with open('token.pickle', 'wb') as token:
                 pickle.dump(creds, token)
         else:
             raise Exception("Credentials are invalid and cannot be refreshed")
     return creds.token
 
-def extract_folder_id(input_str):
-    """Extract folder ID from Google Drive URL or return the input if it's already an ID."""
-    # Pattern to match folder ID in Google Drive URLs
-    url_pattern = r'/folders/([a-zA-Z0-9_-]+)'
-    match = re.search(url_pattern, input_str)
-    if match:
-        return match.group(1)
-    # If no match, assume it's already a folder ID
-    return input_str
 
 def get_folder_name(service, folder_id):
     """Get the name of a Google Drive folder by its ID."""
@@ -238,6 +259,7 @@ def get_folder_name(service, folder_id):
     except Exception as e:
         logger.exception(f"Error getting folder name: {e}")
         return 'Untitled Folder'
+
 
 def get_or_create_album(creds, album_title):
     """Get existing album ID or create a new album in Google Photos."""
@@ -262,16 +284,14 @@ def get_or_create_album(creds, album_title):
             result = response.json()
             albums = result.get('albums', [])
 
-            # Check if album exists in this page
             for album in albums:
                 if album.get('title') == album_title:
                     logger.info(f"Using existing album: {album_title}")
                     return album['id']
 
-            # Check if there are more pages
             page_token = result.get('nextPageToken')
             if not page_token:
-                break  # No more pages
+                break
         else:
             logger.warning(f"Failed to list albums: {response.text}")
             break
@@ -289,6 +309,35 @@ def get_or_create_album(creds, album_title):
         logger.error(f"Failed to create album: {response.text}")
         return None
 
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def extract_folder_id(input_str):
+    """Extract folder ID from Google Drive URL or return the input if it's already an ID."""
+    url_pattern = r'/folders/([a-zA-Z0-9_-]+)'
+    match = re.search(url_pattern, input_str)
+    if match:
+        return match.group(1)
+    return input_str
+
+
+def check_ffmpeg_installed():
+    """Check if ffmpeg is installed and available."""
+    return shutil.which('ffmpeg') is not None
+
+
+def should_convert_video(file_name):
+    """Check if video file should be converted to smaller format."""
+    ext = os.path.splitext(file_name.lower())[1]
+    return ext in VIDEO_FORMATS_TO_CONVERT
+
+
+# ============================================================================
+# FILE PROCESSING FUNCTIONS
+# ============================================================================
+
 def download_from_drive(service, file_id, file_name):
     """Download a file from Google Drive. Raises exception on failure."""
     request = service.files().get_media(fileId=file_id)
@@ -299,16 +348,6 @@ def download_from_drive(service, file_id, file_name):
         status, done = downloader.next_chunk()
     return file_name
 
-def check_ffmpeg_installed():
-    """Check if ffmpeg is installed and available."""
-    return shutil.which('ffmpeg') is not None
-
-def should_convert_video(file_name):
-    """Check if video file should be converted to smaller format."""
-    # File extensions that typically have large file sizes
-    large_video_formats = ['.mts', '.m2ts', '.mod', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg', '.vob']
-    ext = os.path.splitext(file_name.lower())[1]
-    return ext in large_video_formats
 
 def convert_video_to_mp4(input_path, original_filename):
     """
@@ -319,7 +358,6 @@ def convert_video_to_mp4(input_path, original_filename):
         logger.warning("  ffmpeg not installed, skipping conversion (install with: brew install ffmpeg)")
         return input_path
 
-    # Create output filename
     base_name = os.path.splitext(input_path)[0]
     output_path = f"{base_name}_converted.mp4"
 
@@ -327,41 +365,34 @@ def convert_video_to_mp4(input_path, original_filename):
     logger.info(f"  Converting {original_filename} ({original_size:.1f}MB) to MP4 using ffmpeg...")
 
     try:
-        # FFmpeg command for good quality with reasonable file size
-        # -crf 23 is the default quality (lower = better, 18-28 is reasonable range)
-        # -preset medium balances speed and compression
-        # -movflags +faststart optimizes for streaming/web playback
         cmd = [
             'ffmpeg',
             '-i', input_path,
-            '-c:v', 'libx264',          # H.264 video codec
-            '-crf', '23',                # Quality level (18-28 recommended)
-            '-preset', 'medium',         # Encoding speed/compression balance
-            '-c:a', 'aac',               # AAC audio codec
-            '-b:a', '128k',              # Audio bitrate
-            '-movflags', '+faststart',   # Optimize for streaming
-            '-y',                        # Overwrite output file
+            '-c:v', 'libx264',
+            '-crf', FFMPEG_CRF_QUALITY,
+            '-preset', FFMPEG_PRESET,
+            '-c:a', 'aac',
+            '-b:a', AUDIO_BITRATE,
+            '-movflags', '+faststart',
+            '-y',
             output_path
         ]
 
-        # Run ffmpeg
         logger.info(f"  Running ffmpeg conversion (this may take several minutes)...")
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=3600  # 1 hour timeout for very large files
+            timeout=3600
         )
 
         if result.returncode != 0:
             raise Exception(f"ffmpeg conversion failed: {result.stderr}")
 
-        # Check that output file was created and is not empty
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             raise Exception("Converted file is missing or empty")
 
-        # Log size reduction
         converted_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
         reduction_pct = ((original_size - converted_size) / original_size * 100) if original_size > 0 else 0
 
@@ -372,7 +403,6 @@ def convert_video_to_mp4(input_path, original_filename):
     except subprocess.TimeoutExpired:
         raise Exception("Video conversion timed out after 1 hour")
     except Exception as e:
-        # Clean up partial output file if it exists
         if os.path.exists(output_path):
             try:
                 os.remove(output_path)
@@ -380,12 +410,12 @@ def convert_video_to_mp4(input_path, original_filename):
                 pass
         raise Exception(f"Video conversion failed: {str(e)}")
 
+
 def upload_to_photos(creds, file_path, filename, album_id=None):
     """Upload a file to Google Photos. Raises exception on failure."""
-    # Get a fresh token for this upload
     token = get_valid_token(creds)
 
-    # Step 1: Upload bytes to get an upload token
+    # Step 1: Upload bytes
     upload_url = 'https://photoslibrary.googleapis.com/v1/uploads'
     headers = {
         'Authorization': f'Bearer {token}',
@@ -403,7 +433,7 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
 
     upload_token = response.text
 
-    # Step 2: Create media item in library (refresh token again if needed)
+    # Step 2: Create media item
     token = get_valid_token(creds)
     create_url = 'https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate'
     headers = {
@@ -417,14 +447,12 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
         }]
     }
 
-    # Add album if specified
     if album_id:
         body["albumId"] = album_id
 
     res = requests.post(create_url, headers=headers, json=body)
     result = res.json()
 
-    # Check if upload was successful
     if res.status_code == 200 and result.get('newMediaItemResults'):
         status = result['newMediaItemResults'][0].get('status', {})
         if status.get('message') == 'Success' or not status:
@@ -433,6 +461,7 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
             raise Exception(f"Media item creation failed: {status}")
 
     raise Exception(f"Failed to create media item (status {res.status_code}): {result}")
+
 
 def process_single_file_with_retry(service, creds, file_id, file_name, album_id=None):
     """
@@ -445,12 +474,12 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            # Download from Drive
+            # Download
             local_file = download_from_drive(service, file_id, file_name)
-            download_size = os.path.getsize(local_file) / (1024 * 1024)  # MB
+            download_size = os.path.getsize(local_file) / (1024 * 1024)
             logger.info(f"  Downloaded: {download_size:.1f}MB")
 
-            # Check if video should be converted
+            # Convert if needed
             file_to_upload = local_file
             if should_convert_video(file_name):
                 logger.info(f"  Large video format detected, will convert to MP4")
@@ -464,14 +493,13 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
                         logger.info(f"  Conversion skipped, using original file")
                 except Exception as conv_error:
                     logger.warning(f"  Video conversion failed, uploading original: {conv_error}")
-                    # Continue with original file if conversion fails
                     file_to_upload = local_file
 
-            # Upload to Photos
+            # Upload
             logger.info(f"  Uploading to Google Photos...")
             upload_to_photos(creds, file_to_upload, file_name, album_id)
 
-            # Success! Clean up and return
+            # Success - cleanup
             if local_file and os.path.exists(local_file):
                 os.remove(local_file)
             if converted_file and os.path.exists(converted_file) and converted_file != local_file:
@@ -482,7 +510,7 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
             last_error = str(e)
             logger.exception(f"  Attempt {attempt}/{MAX_RETRIES} failed: {last_error}")
 
-            # Clean up local files if they exist
+            # Cleanup
             if local_file and os.path.exists(local_file):
                 try:
                     os.remove(local_file)
@@ -494,15 +522,19 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
                 except:
                     pass
 
-            # If not the last attempt, wait before retrying
+            # Wait before retry
             if attempt < MAX_RETRIES:
                 logger.info(f"  Waiting {RETRY_WAIT_SECONDS} seconds before retry...")
                 time.sleep(RETRY_WAIT_SECONDS)
             else:
                 logger.exception(f"  All {MAX_RETRIES} attempts failed")
 
-    # All retries failed
     return False, last_error
+
+
+# ============================================================================
+# MODE HANDLER FUNCTIONS
+# ============================================================================
 
 def plan_folder(service, folder_id, planned_count=None):
     """
@@ -518,33 +550,28 @@ def plan_folder(service, folder_id, planned_count=None):
 
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            # Recursively scan subfolders
             plan_folder(service, item['id'], planned_count)
         elif 'image' in item['mimeType']:
-            # Found an image file
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
             save_planned_file(file_id, file_url, item['name'], item['mimeType'])
             planned_count['images'] += 1
             logger.info(f"Found image: {item['name']}")
         elif 'video' in item['mimeType']:
-            # Found a video file
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
             save_planned_file(file_id, file_url, item['name'], item['mimeType'])
             planned_count['videos'] += 1
             logger.info(f"Found video: {item['name']}")
         else:
-            # Non-image/video file
             planned_count['other'] += 1
             logger.debug(f"Skipping (not image/video): {item['name']} (type: {item['mimeType']})")
 
     return planned_count
 
+
 def process_from_plan(service, creds, planned_files, album_id, processed_files, failed_files):
-    """
-    Process files from the planned_files list.
-    """
+    """Process files from the planned_files list."""
     total_files = len(planned_files)
     processed_count = 0
     failed_count = 0
@@ -553,13 +580,11 @@ def process_from_plan(service, creds, planned_files, album_id, processed_files, 
     logger.info(f"Processing {total_files} files from plan...")
 
     for idx, (file_id, file_url, file_name, mime_type) in enumerate(planned_files, 1):
-        # Check if already processed
         if file_id in processed_files:
             logger.info(f"[{idx}/{total_files}] Skipping (already processed): {file_name}")
             skipped_count += 1
             continue
 
-        # Check if previously failed
         if file_id in failed_files:
             logger.warning(f"[{idx}/{total_files}] Skipping (previously failed): {file_name}")
             skipped_count += 1
@@ -571,13 +596,11 @@ def process_from_plan(service, creds, planned_files, album_id, processed_files, 
         )
 
         if success:
-            # Save to processed files log
             save_processed_file(file_id, file_url)
             processed_files.add(file_id)
             processed_count += 1
             logger.success(f"[{idx}/{total_files}] Done: {file_name}")
         else:
-            # Save to failed files log
             save_failed_file(file_id, file_url, file_name, error_msg)
             failed_files.add(file_id)
             failed_count += 1
@@ -585,12 +608,9 @@ def process_from_plan(service, creds, planned_files, album_id, processed_files, 
 
     return processed_count, failed_count, skipped_count
 
+
 def retry_failed_files(service, creds, album_id, processed_files):
-    """
-    Retry processing files from the failed files log.
-    Returns (success_count, still_failed_count)
-    """
-    # Load failed files with details
+    """Retry processing files from the failed files log."""
     failed_files_list = load_failed_files_detailed()
 
     if not failed_files_list:
@@ -604,7 +624,7 @@ def retry_failed_files(service, creds, album_id, processed_files):
     logger.info(f"Retrying {total_files} failed files...")
 
     for idx, (file_id, file_url, file_name, old_error) in enumerate(failed_files_list, 1):
-        # If filename is unknown (old format), try to fetch it from Drive API
+        # Fetch filename if unknown (old format)
         if file_name.startswith('unknown_'):
             try:
                 file_metadata = service.files().get(fileId=file_id, fields='name').execute()
@@ -612,8 +632,8 @@ def retry_failed_files(service, creds, album_id, processed_files):
                 logger.debug(f"Fetched filename from Drive: {file_name}")
             except Exception as e:
                 logger.warning(f"Could not fetch filename for {file_id}: {e}")
-                # Keep the placeholder name
-        # Check if already processed (in case of duplicates)
+
+        # Check if already processed
         if file_id in processed_files:
             logger.info(f"[{idx}/{total_files}] Skipping (already processed): {file_name}")
             remove_from_failed_files(file_id)
@@ -628,14 +648,12 @@ def retry_failed_files(service, creds, album_id, processed_files):
         )
 
         if success:
-            # Success! Move from failed to processed
             save_processed_file(file_id, file_url)
             remove_from_failed_files(file_id)
             processed_files.add(file_id)
             success_count += 1
             logger.success(f"[{idx}/{total_files}] Success on retry: {file_name}")
         else:
-            # Still failed - update the error message in failed log
             remove_from_failed_files(file_id)
             save_failed_file(file_id, file_url, file_name, error_msg)
             still_failed_count += 1
@@ -643,7 +661,9 @@ def retry_failed_files(service, creds, album_id, processed_files):
 
     return success_count, still_failed_count
 
+
 def process_folder(service, creds, folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None):
+    """Process all files in a folder recursively (legacy mode)."""
     if processed_files is None:
         processed_files = set()
     if failed_files is None:
@@ -662,12 +682,10 @@ def process_folder(service, creds, folder_id, album_id=None, processed_files=Non
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
 
-            # Check if already processed
             if file_id in processed_files:
                 logger.info(f"Skipping (already processed): {item['name']}")
                 continue
 
-            # Check if previously failed
             if file_id in failed_files:
                 logger.warning(f"Skipping (previously failed): {item['name']}")
                 continue
@@ -678,243 +696,238 @@ def process_folder(service, creds, folder_id, album_id=None, processed_files=Non
             )
 
             if success:
-                # Save to processed files log
                 save_processed_file(file_id, file_url)
                 processed_files.add(file_id)
                 logger.success(f"Done: {item['name']}")
             else:
-                # Save to failed files log
                 save_failed_file(file_id, file_url, item['name'], error_msg)
                 failed_files.add(file_id)
                 logger.error(f"Failed permanently: {item['name']}")
         else:
-            # Skip non-image/video files
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
 
-            # Check if already logged as skipped
             if file_id not in skipped_files:
                 save_skipped_file(file_id, file_url, item['mimeType'])
                 skipped_files.add(file_id)
                 logger.info(f"Skipping (not image/video): {item['name']} (type: {item['mimeType']})")
 
+
+# ============================================================================
+# MODE EXECUTION FUNCTIONS (Extracted from main)
+# ============================================================================
+
+def run_retry_mode(args):
+    """Execute retry mode."""
+    if not os.path.exists(FAILED_FILES_LOG):
+        logger.warning(f"Failed files log not found: {FAILED_FILES_LOG}")
+        logger.info("No failed files to retry")
+        return
+
+    logger.info("Running in RETRY mode - retrying failed files...")
+
+    failed_files_list = load_failed_files_detailed()
+    if not failed_files_list:
+        logger.info("No failed files to retry")
+        return
+
+    logger.info(f"Found {len(failed_files_list)} failed files to retry")
+
+    processed_files = load_processed_files()
+    logger.info(f"Loaded {len(processed_files)} previously processed files")
+
+    drive_service, creds = get_services()
+
+    album_name = args.album if args.album else DEFAULT_ALBUM_NAME
+    logger.info(f"Using album name: {album_name}")
+
+    album_id = get_or_create_album(creds, album_name)
+
+    success_count, still_failed_count = retry_failed_files(
+        drive_service, creds, album_id, processed_files
+    )
+
+    logger.info("Retry complete!")
+    logger.info(f"Successfully processed on retry: {success_count} files")
+    logger.info(f"Still failing: {still_failed_count} files")
+
+
+def run_execute_mode(args):
+    """Execute execute mode."""
+    if not os.path.exists(PLANNED_FILES_LOG):
+        logger.error(f"Plan file not found: {PLANNED_FILES_LOG}")
+        logger.error("Please run with --plan first to scan and create the plan file")
+        logger.error(f"Example: python {sys.argv[0]} FOLDER_ID --plan")
+        sys.exit(1)
+
+    logger.info("Running in EXECUTE mode - processing files from plan...")
+
+    planned_files = load_planned_files()
+    if not planned_files:
+        logger.error("Plan file is empty or invalid")
+        sys.exit(1)
+
+    logger.info(f"Loaded {len(planned_files)} files from plan")
+
+    processed_files = load_processed_files()
+    failed_files = load_failed_files()
+    logger.info(f"Loaded {len(processed_files)} previously processed files")
+    logger.info(f"Loaded {len(failed_files)} previously failed files")
+
+    drive_service, creds = get_services()
+
+    album_name = args.album if args.album else DEFAULT_ALBUM_NAME
+    logger.info(f"Using album name: {album_name}")
+
+    album_id = get_or_create_album(creds, album_name)
+
+    processed_count, failed_count, skipped_count = process_from_plan(
+        drive_service, creds, planned_files, album_id, processed_files, failed_files
+    )
+
+    logger.info("Execution complete!")
+    logger.info(f"Successfully processed: {processed_count} files")
+    logger.info(f"Failed: {failed_count} files")
+    logger.info(f"Skipped (already processed/failed): {skipped_count} files")
+
+
+def run_plan_mode(args):
+    """Execute plan mode."""
+    if not args.folder:
+        logger.error("Folder argument is required for --plan mode")
+        logger.error(f"Example: python {sys.argv[0]} FOLDER_ID --plan")
+        sys.exit(1)
+
+    folder_id = extract_folder_id(args.folder)
+    logger.info(f"Using folder ID: {folder_id}")
+
+    drive_service, creds = get_services()
+
+    folder_name = get_folder_name(drive_service, folder_id)
+    logger.info(f"Folder name: {folder_name}")
+
+    logger.info("Running in PLAN mode - scanning folder structure...")
+
+    if os.path.exists(PLANNED_FILES_LOG):
+        os.remove(PLANNED_FILES_LOG)
+        logger.info(f"Cleared previous plan file: {PLANNED_FILES_LOG}")
+
+    counts = plan_folder(drive_service, folder_id)
+
+    logger.info("Planning complete!")
+    logger.info(f"Found {counts['images']} image files")
+    logger.info(f"Found {counts['videos']} video files")
+    logger.info(f"Found {counts['other']} other files (skipped)")
+    logger.info(f"Plan saved to: {PLANNED_FILES_LOG}")
+
+
+def run_combined_mode(args):
+    """Execute combined mode (plan + execute)."""
+    if not args.folder:
+        logger.error("Folder argument is required")
+        logger.error(f"Example: python {sys.argv[0]} FOLDER_ID")
+        sys.exit(1)
+
+    folder_id = extract_folder_id(args.folder)
+    logger.info(f"Using folder ID: {folder_id}")
+
+    drive_service, creds = get_services()
+
+    folder_name = get_folder_name(drive_service, folder_id)
+    logger.info(f"Folder name: {folder_name}")
+
+    logger.info("Running in COMBINED mode (plan + execute)...")
+    logger.info("")
+    logger.info(SEPARATOR_LINE)
+    logger.info("STEP 1/2: PLANNING - Scanning folder structure...")
+    logger.info(SEPARATOR_LINE)
+    logger.info("")
+
+    if os.path.exists(PLANNED_FILES_LOG):
+        os.remove(PLANNED_FILES_LOG)
+        logger.info(f"Cleared previous plan file: {PLANNED_FILES_LOG}")
+
+    counts = plan_folder(drive_service, folder_id)
+
+    logger.info("")
+    logger.info("Planning complete!")
+    logger.info(f"Found {counts['images']} image files")
+    logger.info(f"Found {counts['videos']} video files")
+    logger.info(f"Found {counts['other']} other files (skipped)")
+    logger.info(f"Plan saved to: {PLANNED_FILES_LOG}")
+
+    logger.info("")
+    logger.info(SEPARATOR_LINE)
+    logger.info("STEP 2/2: EXECUTING - Processing files from plan...")
+    logger.info(SEPARATOR_LINE)
+    logger.info("")
+
+    planned_files = load_planned_files()
+    if not planned_files:
+        logger.error("Failed to load planned files")
+        sys.exit(1)
+
+    logger.info(f"Loaded {len(planned_files)} files from plan")
+
+    processed_files = load_processed_files()
+    failed_files = load_failed_files()
+    logger.info(f"Loaded {len(processed_files)} previously processed files")
+    logger.info(f"Loaded {len(failed_files)} previously failed files")
+
+    album_name = args.album if args.album else folder_name
+    logger.info(f"Using album name: {album_name}")
+
+    album_id = get_or_create_album(creds, album_name)
+
+    processed_count, failed_count, skipped_count = process_from_plan(
+        drive_service, creds, planned_files, album_id, processed_files, failed_files
+    )
+
+    logger.info("")
+    logger.info(SEPARATOR_LINE)
+    logger.info("ALL STEPS COMPLETE!")
+    logger.info(SEPARATOR_LINE)
+    logger.info(f"Successfully processed: {processed_count} files")
+    logger.info(f"Failed: {failed_count} files")
+    logger.info(f"Skipped (already processed/failed): {skipped_count} files")
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description='Download photos/videos from Google Drive and upload to Google Photos',
+        epilog='Default behavior (no flags): Run plan + execute sequentially')
+    parser.add_argument('folder', nargs='?', help='Google Drive folder URL or folder ID')
+    parser.add_argument('--plan', action='store_true',
+                      help='PLAN ONLY: Scan folder and save list of files to planned_files.txt without processing')
+    parser.add_argument('--execute', action='store_true',
+                      help='EXECUTE ONLY: Process files from planned_files.txt (must run --plan first)')
+    parser.add_argument('--retry', action='store_true',
+                      help='RETRY ONLY: Retry processing files from failed_files.txt')
+    parser.add_argument('--album', type=str, default=None,
+                      help='Album name for Google Photos (default: FOTO for --execute, folder name for other modes)')
+    args = parser.parse_args()
+
+    logger.info(f"Fotointegrator started - Log file: {log_filename}")
+
+    # Route to appropriate mode handler
+    if args.retry:
+        run_retry_mode(args)
+    elif args.execute:
+        run_execute_mode(args)
+    elif args.plan:
+        run_plan_mode(args)
+    else:
+        run_combined_mode(args)
+
+
 if __name__ == '__main__':
     try:
-        parser = argparse.ArgumentParser(
-            description='Download photos/videos from Google Drive and upload to Google Photos',
-            epilog='Default behavior (no flags): Run plan + execute sequentially')
-        parser.add_argument('folder', nargs='?', help='Google Drive folder URL or folder ID')
-        parser.add_argument('--plan', action='store_true',
-                          help='PLAN ONLY: Scan folder and save list of files to planned_files.txt without processing')
-        parser.add_argument('--execute', action='store_true',
-                          help='EXECUTE ONLY: Process files from planned_files.txt (must run --plan first)')
-        parser.add_argument('--retry', action='store_true',
-                          help='RETRY ONLY: Retry processing files from failed_files.txt')
-        parser.add_argument('--album', type=str, default=None,
-                          help='Album name for Google Photos (default: FOTO for --execute, folder name for other modes)')
-        args = parser.parse_args()
-
-        logger.info(f"Fotointegrator started - Log file: {log_filename}")
-
-        # Validate argument combinations
-        if args.retry:
-            # Retry mode: retry failed files
-            if not os.path.exists(FAILED_FILES_LOG):
-                logger.warning(f"Failed files log not found: {FAILED_FILES_LOG}")
-                logger.info("No failed files to retry")
-                sys.exit(0)
-
-            logger.info("Running in RETRY mode - retrying failed files...")
-
-            # Load failed files
-            failed_files_list = load_failed_files_detailed()
-            if not failed_files_list:
-                logger.info("No failed files to retry")
-                sys.exit(0)
-
-            logger.info(f"Found {len(failed_files_list)} failed files to retry")
-
-            # Load previously processed files
-            processed_files = load_processed_files()
-            logger.info(f"Loaded {len(processed_files)} previously processed files")
-
-            # Get services
-            drive_service, creds = get_services()
-
-            # Determine album name
-            album_name = args.album if args.album else 'FOTO'
-            logger.info(f"Using album name: {album_name}")
-
-            # Create/get album
-            album_id = get_or_create_album(creds, album_name)
-
-            # Retry failed files
-            success_count, still_failed_count = retry_failed_files(
-                drive_service, creds, album_id, processed_files
-            )
-
-            logger.info("Retry complete!")
-            logger.info(f"Successfully processed on retry: {success_count} files")
-            logger.info(f"Still failing: {still_failed_count} files")
-
-        elif args.execute:
-            # Execute mode: process from plan file
-            if not os.path.exists(PLANNED_FILES_LOG):
-                logger.error(f"Plan file not found: {PLANNED_FILES_LOG}")
-                logger.error("Please run with --plan first to scan and create the plan file")
-                logger.error(f"Example: python {sys.argv[0]} FOLDER_ID --plan")
-                sys.exit(1)
-
-            logger.info("Running in EXECUTE mode - processing files from plan...")
-
-            # Load planned files
-            planned_files = load_planned_files()
-            if not planned_files:
-                logger.error("Plan file is empty or invalid")
-                sys.exit(1)
-
-            logger.info(f"Loaded {len(planned_files)} files from plan")
-
-            # Load previously processed and failed files
-            processed_files = load_processed_files()
-            failed_files = load_failed_files()
-            logger.info(f"Loaded {len(processed_files)} previously processed files")
-            logger.info(f"Loaded {len(failed_files)} previously failed files")
-
-            # Get services
-            drive_service, creds = get_services()
-
-            # Determine album name
-            album_name = args.album if args.album else 'FOTO'
-            logger.info(f"Using album name: {album_name}")
-
-            # Create/get album
-            album_id = get_or_create_album(creds, album_name)
-
-            # Process files from plan
-            processed_count, failed_count, skipped_count = process_from_plan(
-                drive_service, creds, planned_files, album_id, processed_files, failed_files
-            )
-
-            logger.info("Execution complete!")
-            logger.info(f"Successfully processed: {processed_count} files")
-            logger.info(f"Failed: {failed_count} files")
-            logger.info(f"Skipped (already processed/failed): {skipped_count} files")
-
-        elif args.plan:
-            # Plan mode: scan and save file list without processing
-            if not args.folder:
-                logger.error("Folder argument is required for --plan mode")
-                logger.error(f"Example: python {sys.argv[0]} FOLDER_ID --plan")
-                sys.exit(1)
-
-            # Extract folder ID from URL if necessary
-            folder_id = extract_folder_id(args.folder)
-            logger.info(f"Using folder ID: {folder_id}")
-
-            # Get services
-            drive_service, creds = get_services()
-
-            # Get folder name
-            folder_name = get_folder_name(drive_service, folder_id)
-            logger.info(f"Folder name: {folder_name}")
-
-            logger.info("Running in PLAN mode - scanning folder structure...")
-
-            # Clear previous plan file
-            if os.path.exists(PLANNED_FILES_LOG):
-                os.remove(PLANNED_FILES_LOG)
-                logger.info(f"Cleared previous plan file: {PLANNED_FILES_LOG}")
-
-            # Scan folder recursively
-            counts = plan_folder(drive_service, folder_id)
-
-            logger.info("Planning complete!")
-            logger.info(f"Found {counts['images']} image files")
-            logger.info(f"Found {counts['videos']} video files")
-            logger.info(f"Found {counts['other']} other files (skipped)")
-            logger.info(f"Plan saved to: {PLANNED_FILES_LOG}")
-        else:
-            # Default mode: run both plan and execute sequentially
-            if not args.folder:
-                logger.error("Folder argument is required")
-                logger.error(f"Example: python {sys.argv[0]} FOLDER_ID")
-                sys.exit(1)
-
-            # Extract folder ID from URL if necessary
-            folder_id = extract_folder_id(args.folder)
-            logger.info(f"Using folder ID: {folder_id}")
-
-            # Get services
-            drive_service, creds = get_services()
-
-            # Get folder name
-            folder_name = get_folder_name(drive_service, folder_id)
-            logger.info(f"Folder name: {folder_name}")
-
-            logger.info("Running in COMBINED mode (plan + execute)...")
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info("STEP 1/2: PLANNING - Scanning folder structure...")
-            logger.info("=" * 70)
-            logger.info("")
-
-            # Clear previous plan file
-            if os.path.exists(PLANNED_FILES_LOG):
-                os.remove(PLANNED_FILES_LOG)
-                logger.info(f"Cleared previous plan file: {PLANNED_FILES_LOG}")
-
-            # Scan folder recursively
-            counts = plan_folder(drive_service, folder_id)
-
-            logger.info("")
-            logger.info("Planning complete!")
-            logger.info(f"Found {counts['images']} image files")
-            logger.info(f"Found {counts['videos']} video files")
-            logger.info(f"Found {counts['other']} other files (skipped)")
-            logger.info(f"Plan saved to: {PLANNED_FILES_LOG}")
-
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info("STEP 2/2: EXECUTING - Processing files from plan...")
-            logger.info("=" * 70)
-            logger.info("")
-
-            # Load the plan we just created
-            planned_files = load_planned_files()
-            if not planned_files:
-                logger.error("Failed to load planned files")
-                sys.exit(1)
-
-            logger.info(f"Loaded {len(planned_files)} files from plan")
-
-            # Load previously processed and failed files
-            processed_files = load_processed_files()
-            failed_files = load_failed_files()
-            logger.info(f"Loaded {len(processed_files)} previously processed files")
-            logger.info(f"Loaded {len(failed_files)} previously failed files")
-
-            # Determine album name (use --album if provided, otherwise folder name)
-            album_name = args.album if args.album else folder_name
-            logger.info(f"Using album name: {album_name}")
-
-            # Create/get album
-            album_id = get_or_create_album(creds, album_name)
-
-            # Process files from plan
-            processed_count, failed_count, skipped_count = process_from_plan(
-                drive_service, creds, planned_files, album_id, processed_files, failed_files
-            )
-
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info("ALL STEPS COMPLETE!")
-            logger.info("=" * 70)
-            logger.info(f"Successfully processed: {processed_count} files")
-            logger.info(f"Failed: {failed_count} files")
-            logger.info(f"Skipped (already processed/failed): {skipped_count} files")
-
+        main()
     except Exception as e:
         logger.exception(f"Fatal error in main execution: {e}")
         sys.exit(1)
-
