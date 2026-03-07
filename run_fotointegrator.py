@@ -58,7 +58,7 @@ MAX_RETRIES = 10
 RETRY_WAIT_SECONDS = 30
 
 # File size validation
-MIN_FILE_SIZE_BYTES = 100  # Default minimum file size in bytes
+MIN_FILE_SIZE_BYTES = 16384  # Default minimum file size in bytes (16 KB)
 
 # Video conversion
 VIDEO_FORMATS_TO_CONVERT = ['.mts', '.m2ts', '.mod', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg', '.vob']
@@ -1040,8 +1040,8 @@ def main():
                       help='Number of retry attempts when processing a file fails (default: 3)')
     parser.add_argument('--wait_on_error', type=int, default=30,
                       help='Number of seconds to wait between retry attempts (default: 30)')
-    parser.add_argument('--min_bytes', type=int, default=100,
-                      help='Minimum file size in bytes - files smaller will be skipped (default: 100)')
+    parser.add_argument('--min_bytes', type=int, default=16384,
+                      help='Minimum file size in bytes - files smaller will be skipped (default: 16384 = 16 KB)')
     args = parser.parse_args()
 
     logger.info("Fotointegrator started")
