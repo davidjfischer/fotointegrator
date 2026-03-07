@@ -369,6 +369,7 @@ def video_has_audio_stream(file_path):
         return True  # Assume audio exists if we can't check
 
     try:
+        logger.info(f"  Running ffprobe to detect audio stream...")
         cmd = [
             'ffprobe',
             '-v', 'error',
@@ -387,7 +388,14 @@ def video_has_audio_stream(file_path):
         )
 
         # If output contains 'audio', then audio stream exists
-        return 'audio' in result.stdout.lower()
+        has_audio = 'audio' in result.stdout.lower()
+
+        if has_audio:
+            logger.info(f"  ✓ Audio stream detected in video file")
+        else:
+            logger.warning(f"  ✗ No audio stream found in video file")
+
+        return has_audio
 
     except Exception as e:
         logger.warning(f"  Error checking audio stream: {e}")
@@ -403,11 +411,16 @@ def combine_video_and_audio(video_path, audio_path, output_path):
     if not check_ffmpeg_installed():
         raise Exception("ffmpeg not installed, cannot combine video and audio")
 
+    video_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
+    audio_size = os.path.getsize(audio_path) / (1024 * 1024)  # MB
+
     logger.info(f"  Combining video and audio streams...")
-    logger.info(f"    Video: {os.path.basename(video_path)}")
-    logger.info(f"    Audio: {os.path.basename(audio_path)}")
+    logger.info(f"    Video: {os.path.basename(video_path)} ({video_size:.1f}MB)")
+    logger.info(f"    Audio: {os.path.basename(audio_path)} ({audio_size:.1f}MB)")
+    logger.info(f"    Output: {os.path.basename(output_path)}")
 
     try:
+        logger.info(f"  Running ffmpeg to merge streams (this may take a few minutes)...")
         cmd = [
             'ffmpeg',
             '-i', video_path,
@@ -420,6 +433,9 @@ def combine_video_and_audio(video_path, audio_path, output_path):
             output_path
         ]
 
+        import time
+        start_time = time.time()
+
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -428,6 +444,8 @@ def combine_video_and_audio(video_path, audio_path, output_path):
             timeout=3600
         )
 
+        elapsed_time = time.time() - start_time
+
         if result.returncode != 0:
             raise Exception(f"ffmpeg merge failed: {result.stderr}")
 
@@ -435,7 +453,9 @@ def combine_video_and_audio(video_path, audio_path, output_path):
             raise Exception("Combined file is missing or empty")
 
         combined_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
-        logger.success(f"  Successfully combined video+audio: {combined_size:.1f}MB")
+        logger.success(f"  ✓ Successfully combined video+audio in {elapsed_time:.1f}s")
+        logger.info(f"    Input:  {video_size:.1f}MB (video) + {audio_size:.1f}MB (audio)")
+        logger.info(f"    Output: {combined_size:.1f}MB (combined)")
 
         return output_path
 
@@ -464,7 +484,9 @@ def find_matching_audio_file(service, folder_id, video_filename):
     base_name = os.path.splitext(video_filename)[0]
     audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
 
-    logger.info(f"  Searching for matching audio file for: {base_name}")
+    logger.info(f"  Searching for matching audio file...")
+    logger.info(f"    Base name: {base_name}")
+    logger.info(f"    Looking for extensions: {', '.join(audio_extensions)}")
 
     try:
         # Search for files with the same base name
@@ -472,16 +494,19 @@ def find_matching_audio_file(service, folder_id, video_filename):
         results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
         items = results.get('files', [])
 
+        logger.info(f"    Found {len(items)} file(s) matching base name '{base_name}'")
+
         for item in items:
             item_base_name = os.path.splitext(item['name'])[0]
             item_ext = os.path.splitext(item['name'].lower())[1]
+            logger.info(f"      - Checking: {item['name']} (type: {item.get('mimeType', 'unknown')})")
 
             # Check if it's an audio file with exact base name match
             if item_base_name == base_name and (item_ext in audio_extensions or 'audio' in item.get('mimeType', '')):
-                logger.info(f"  Found matching audio file: {item['name']}")
+                logger.info(f"  ✓ Found matching audio file: {item['name']}")
                 return (item['id'], item['name'])
 
-        logger.info(f"  No matching audio file found")
+        logger.warning(f"  ✗ No matching audio file found in {len(items)} candidate(s)")
         return None
 
     except Exception as e:
@@ -669,17 +694,20 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
             # Check for video files without audio and combine with separate audio if found
             file_ext = os.path.splitext(file_name.lower())[1]
             if file_ext in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm']:
+                logger.info(f"  Video file detected: {file_name}")
                 logger.info(f"  Checking for audio stream in video file...")
                 if not video_has_audio_stream(local_file):
-                    logger.warning(f"  Video file has no audio stream")
+                    logger.warning(f"  Video file has no audio stream - attempting to find separate audio file")
                     # Search for matching audio file
                     audio_match = find_matching_audio_file(service, folder_id, file_name)
                     if audio_match:
                         audio_file_id, audio_file_name = audio_match
                         try:
                             # Download the audio file
-                            logger.info(f"  Downloading matching audio file...")
+                            logger.info(f"  Downloading matching audio file: {audio_file_name}...")
                             audio_file = download_from_drive(service, audio_file_id, audio_file_name)
+                            audio_size = os.path.getsize(audio_file) / (1024 * 1024)
+                            logger.info(f"  Downloaded audio file: {audio_size:.1f}MB")
 
                             # Combine video and audio
                             base_name = os.path.splitext(local_file)[0]
@@ -687,15 +715,17 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
                             combine_video_and_audio(local_file, audio_file, combined_file)
 
                             # Use combined file for further processing
+                            old_file = local_file
                             local_file = combined_file
-                            logger.info(f"  Using combined video+audio file")
+                            logger.info(f"  ✓ Will upload combined video+audio file instead of original video")
                         except Exception as audio_error:
-                            logger.warning(f"  Failed to combine video+audio: {audio_error}")
-                            logger.info(f"  Will upload video without audio")
+                            logger.warning(f"  ✗ Failed to combine video+audio: {audio_error}")
+                            logger.warning(f"  Will upload original video without audio")
                     else:
-                        logger.warning(f"  No matching audio file found, uploading video without audio")
+                        logger.warning(f"  ✗ No matching audio file found in folder")
+                        logger.warning(f"  Will upload video without audio")
                 else:
-                    logger.info(f"  Video has audio stream")
+                    logger.info(f"  Video already has audio stream - no combination needed")
 
             # Convert if needed
             file_to_upload = local_file
