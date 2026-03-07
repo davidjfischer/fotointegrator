@@ -1,5 +1,49 @@
 # Changelog
 
+## [2024-03-07] Configurable Retry Parameters
+
+### Summary
+Added command-line parameters to configure retry behavior when processing files.
+
+### New Parameters
+
+**`--retry_on_error`** (integer, default: 3)
+- Specifies the number of retry attempts when a file fails to process
+- Example: `--retry_on_error 5` will retry up to 5 times before marking a file as failed
+
+**`--wait_on_error`** (integer, default: 30)
+- Specifies the number of seconds to wait between retry attempts
+- Example: `--wait_on_error 60` will wait 60 seconds between retries
+
+### Usage Examples
+
+```bash
+# Use default retry settings (3 attempts, 30 seconds wait)
+python run_fotointegrator.py FOLDER_ID
+
+# Custom retry settings: 5 attempts with 60 seconds wait
+python run_fotointegrator.py FOLDER_ID --retry_on_error 5 --wait_on_error 60
+
+# Retry failed files with custom settings
+python run_fotointegrator.py FOLDER_ID --retry --retry_on_error 10 --wait_on_error 120
+
+# Execute mode with custom retry settings
+python run_fotointegrator.py FOLDER_ID --execute --retry_on_error 2 --wait_on_error 15
+```
+
+### Implementation Details
+
+- Updated `process_single_file_with_retry()` to accept configurable retry parameters
+- Updated all mode handlers to pass retry parameters through the call chain
+- Parameters apply to all processing modes: combined, execute, and retry
+- Log messages now show retry configuration at startup
+
+### Testing
+
+All 22 unit tests pass successfully.
+
+---
+
 ## [2024-03-07] Folder ID Prefixing Update
 
 ### Summary

@@ -486,16 +486,26 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
     raise Exception(f"Failed to create media item (status {res.status_code}): {result}")
 
 
-def process_single_file_with_retry(service, creds, file_id, file_name, album_id=None):
+def process_single_file_with_retry(service, creds, file_id, file_name, album_id=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
     """
     Process a single file with retry logic.
+
+    Args:
+        service: Google Drive service
+        creds: Google credentials
+        file_id: File ID to process
+        file_name: Name of the file
+        album_id: Optional album ID to upload to
+        max_retries: Maximum number of retry attempts (default: MAX_RETRIES)
+        retry_wait_seconds: Seconds to wait between retries (default: RETRY_WAIT_SECONDS)
+
     Returns (success: bool, error_message: str or None)
     """
     local_file = None
     converted_file = None
     last_error = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, max_retries + 1):
         try:
             # Download
             local_file = download_from_drive(service, file_id, file_name)
@@ -531,7 +541,7 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
 
         except Exception as e:
             last_error = str(e)
-            logger.exception(f"  Attempt {attempt}/{MAX_RETRIES} failed: {last_error}")
+            logger.exception(f"  Attempt {attempt}/{max_retries} failed: {last_error}")
 
             # Cleanup
             if local_file and os.path.exists(local_file):
@@ -546,11 +556,11 @@ def process_single_file_with_retry(service, creds, file_id, file_name, album_id=
                     pass
 
             # Wait before retry
-            if attempt < MAX_RETRIES:
-                logger.info(f"  Waiting {RETRY_WAIT_SECONDS} seconds before retry...")
-                time.sleep(RETRY_WAIT_SECONDS)
+            if attempt < max_retries:
+                logger.info(f"  Waiting {retry_wait_seconds} seconds before retry...")
+                time.sleep(retry_wait_seconds)
             else:
-                logger.exception(f"  All {MAX_RETRIES} attempts failed")
+                logger.exception(f"  All {max_retries} attempts failed")
 
     return False, last_error
 
@@ -600,7 +610,7 @@ def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
     return planned_count
 
 
-def process_from_plan(service, creds, folder_id, planned_files, album_id, processed_files, failed_files):
+def process_from_plan(service, creds, folder_id, planned_files, album_id, processed_files, failed_files, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
     """Process files from the planned_files list."""
     total_files = len(planned_files)
     processed_count = 0
@@ -622,7 +632,7 @@ def process_from_plan(service, creds, folder_id, planned_files, album_id, proces
 
         logger.info(f"[{idx}/{total_files}] Processing: {file_name}...")
         success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, album_id
+            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds
         )
 
         if success:
@@ -639,7 +649,7 @@ def process_from_plan(service, creds, folder_id, planned_files, album_id, proces
     return processed_count, failed_count, skipped_count
 
 
-def retry_failed_files(service, creds, folder_id, album_id, processed_files):
+def retry_failed_files(service, creds, folder_id, album_id, processed_files, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
     """Retry processing files from the failed files log."""
     failed_files_list = load_failed_files_detailed(folder_id)
 
@@ -674,7 +684,7 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files):
         logger.info(f"  Previous error: {old_error}")
 
         success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, album_id
+            service, creds, file_id, file_name, album_id, max_retries, retry_wait_seconds
         )
 
         if success:
@@ -692,7 +702,7 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files):
     return success_count, still_failed_count
 
 
-def process_folder(service, creds, root_folder_id, current_folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None):
+def process_folder(service, creds, root_folder_id, current_folder_id, album_id=None, processed_files=None, failed_files=None, skipped_files=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS):
     """Process all files in a folder recursively (legacy mode)."""
     if processed_files is None:
         processed_files = set()
@@ -707,7 +717,7 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
 
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
-            process_folder(service, creds, root_folder_id, item['id'], album_id, processed_files, failed_files, skipped_files)
+            process_folder(service, creds, root_folder_id, item['id'], album_id, processed_files, failed_files, skipped_files, max_retries, retry_wait_seconds)
         elif 'image' in item['mimeType'] or 'video' in item['mimeType']:
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
@@ -722,7 +732,7 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
 
             logger.info(f"Processing: {item['name']}...")
             success, error_msg = process_single_file_with_retry(
-                service, creds, file_id, item['name'], album_id
+                service, creds, file_id, item['name'], album_id, max_retries, retry_wait_seconds
             )
 
             if success:
@@ -768,6 +778,7 @@ def run_retry_mode(args):
         return
 
     logger.info("Running in RETRY mode - retrying failed files...")
+    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait")
 
     failed_files_list = load_failed_files_detailed(folder_id)
     if not failed_files_list:
@@ -787,7 +798,7 @@ def run_retry_mode(args):
     album_id = get_or_create_album(creds, album_name)
 
     success_count, still_failed_count = retry_failed_files(
-        drive_service, creds, folder_id, album_id, processed_files
+        drive_service, creds, folder_id, album_id, processed_files, args.retry_on_error, args.wait_on_error
     )
 
     logger.info("Retry complete!")
@@ -817,6 +828,7 @@ def run_execute_mode(args):
         sys.exit(1)
 
     logger.info("Running in EXECUTE mode - processing files from plan...")
+    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait")
 
     planned_files = load_planned_files(folder_id)
     if not planned_files:
@@ -838,7 +850,7 @@ def run_execute_mode(args):
     album_id = get_or_create_album(creds, album_name)
 
     processed_count, failed_count, skipped_count = process_from_plan(
-        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files
+        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files, args.retry_on_error, args.wait_on_error
     )
 
     logger.info("Execution complete!")
@@ -902,6 +914,7 @@ def run_combined_mode(args):
     logger.info(f"Folder name: {folder_name}")
 
     logger.info("Running in COMBINED mode (plan + execute)...")
+    logger.info(f"Retry configuration: {args.retry_on_error} attempts, {args.wait_on_error} seconds wait")
     logger.info("")
     logger.info(SEPARATOR_LINE)
     logger.info("STEP 1/2: PLANNING - Scanning folder structure...")
@@ -946,7 +959,7 @@ def run_combined_mode(args):
     album_id = get_or_create_album(creds, album_name)
 
     processed_count, failed_count, skipped_count = process_from_plan(
-        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files
+        drive_service, creds, folder_id, planned_files, album_id, processed_files, failed_files, args.retry_on_error, args.wait_on_error
     )
 
     logger.info("")
@@ -976,6 +989,10 @@ def main():
                       help='RETRY ONLY: Retry processing files from failed_files.txt')
     parser.add_argument('--album', type=str, default=None,
                       help='Album name for Google Photos (default: FOTO for --execute, folder name for other modes)')
+    parser.add_argument('--retry_on_error', type=int, default=3,
+                      help='Number of retry attempts when processing a file fails (default: 3)')
+    parser.add_argument('--wait_on_error', type=int, default=30,
+                      help='Number of seconds to wait between retry attempts (default: 30)')
     args = parser.parse_args()
 
     logger.info("Fotointegrator started")
