@@ -1049,27 +1049,36 @@ def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
             plan_folder(service, root_folder_id, item['id'], planned_count)
-        elif 'image' in item['mimeType']:
-            file_id = item['id']
-            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
-            save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
-            planned_count['images'] += 1
-            logger.info(f"Found image: {item['name']}")
-        elif 'video' in item['mimeType']:
-            file_id = item['id']
-            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
-            save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
-            planned_count['videos'] += 1
-            logger.info(f"Found video: {item['name']}")
-        elif 'audio' in item['mimeType']:
-            file_id = item['id']
-            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
-            save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
-            planned_count['audio'] += 1
-            logger.info(f"Found audio: {item['name']}")
         else:
-            planned_count['other'] += 1
-            logger.debug(f"Skipping (not image/video/audio): {item['name']} (type: {item['mimeType']})")
+            # Check file extension to handle cases where MIME type is ambiguous
+            file_ext = os.path.splitext(item['name'].lower())[1]
+            audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
+            video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm', '.mts', '.m2ts', '.mpg', '.mpeg', '.wmv']
+
+            file_id = item['id']
+            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+
+            # Prioritize file extension over MIME type for audio files
+            # (because .m4a files often have video/mp4 MIME type)
+            if file_ext in audio_extensions:
+                save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
+                planned_count['audio'] += 1
+                logger.info(f"Found audio: {item['name']}")
+            elif 'image' in item['mimeType']:
+                save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
+                planned_count['images'] += 1
+                logger.info(f"Found image: {item['name']}")
+            elif file_ext in video_extensions or 'video' in item['mimeType']:
+                save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
+                planned_count['videos'] += 1
+                logger.info(f"Found video: {item['name']}")
+            elif 'audio' in item['mimeType']:
+                save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
+                planned_count['audio'] += 1
+                logger.info(f"Found audio: {item['name']}")
+            else:
+                planned_count['other'] += 1
+                logger.debug(f"Skipping (not image/video/audio): {item['name']} (type: {item['mimeType']})")
 
     return planned_count
 
@@ -1231,60 +1240,74 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
             process_folder(service, creds, root_folder_id, item['id'], album_id, processed_files, failed_files, skipped_files, max_retries, retry_wait_seconds, min_bytes)
-        elif 'image' in item['mimeType'] or 'video' in item['mimeType'] or 'audio' in item['mimeType']:
-            file_id = item['id']
-            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+        else:
+            # Check file extension to identify audio/video files correctly
+            file_ext = os.path.splitext(item['name'].lower())[1]
+            audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
+            video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm', '.mts', '.m2ts', '.mpg', '.mpeg', '.wmv']
 
-            if file_id in processed_files:
-                logger.info(f"Skipping (already processed): {item['name']}")
-                continue
-
-            if file_id in failed_files:
-                logger.warning(f"Skipping (previously failed): {item['name']}")
-                continue
-
-            logger.info(f"Processing: {item['name']}...")
-            success, error_msg, additional_files = process_single_file_with_retry(
-                service, creds, file_id, item['name'], root_folder_id, file_url, album_id, max_retries, retry_wait_seconds, min_bytes
+            is_media_file = (
+                'image' in item['mimeType'] or
+                'video' in item['mimeType'] or
+                'audio' in item['mimeType'] or
+                file_ext in audio_extensions or
+                file_ext in video_extensions
             )
 
-            if success:
-                save_processed_file(root_folder_id, file_id, file_url)
-                processed_files.add(file_id)
-                # Also process additional files
-                for add_file_id, add_file_url in additional_files:
-                    save_processed_file(root_folder_id, add_file_id, add_file_url)
-                    processed_files.add(add_file_id)
-                    logger.info(f"  Also marked as processed: {add_file_id}")
-                logger.success(f"Done: {item['name']}")
-            elif error_msg and error_msg.startswith("SKIP:"):
-                # File should be skipped (e.g., zero bytes)
-                skip_reason = error_msg[5:].strip()  # Remove "SKIP:" prefix
-                save_skipped_file(root_folder_id, file_id, file_url, item['mimeType'], skip_reason)
-                skipped_files.add(file_id)
-                # Also skip additional files
-                for add_file_id, add_file_url in additional_files:
-                    save_skipped_file(root_folder_id, add_file_id, add_file_url, item['mimeType'], skip_reason)
-                    skipped_files.add(add_file_id)
-                    logger.info(f"  Also marked as skipped: {add_file_id}")
-                logger.warning(f"Skipped: {item['name']} - {skip_reason}")
-            else:
-                save_failed_file(root_folder_id, file_id, file_url, item['name'], error_msg)
-                failed_files.add(file_id)
-                # Also fail additional files
-                for add_file_id, add_file_url in additional_files:
-                    save_failed_file(root_folder_id, add_file_id, add_file_url, item['name'], error_msg)
-                    failed_files.add(add_file_id)
-                    logger.info(f"  Also marked as failed: {add_file_id}")
-                logger.error(f"Failed permanently: {item['name']}")
-        else:
-            file_id = item['id']
-            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+            if is_media_file:
+                file_id = item['id']
+                file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
 
-            if file_id not in skipped_files:
-                save_skipped_file(root_folder_id, file_id, file_url, item['mimeType'])
-                skipped_files.add(file_id)
-                logger.info(f"Skipping (not image/video/audio): {item['name']} (type: {item['mimeType']})")
+                if file_id in processed_files:
+                    logger.info(f"Skipping (already processed): {item['name']}")
+                    continue
+
+                if file_id in failed_files:
+                    logger.warning(f"Skipping (previously failed): {item['name']}")
+                    continue
+
+                logger.info(f"Processing: {item['name']}...")
+                success, error_msg, additional_files = process_single_file_with_retry(
+                    service, creds, file_id, item['name'], root_folder_id, file_url, album_id, max_retries, retry_wait_seconds, min_bytes
+                )
+
+                if success:
+                    save_processed_file(root_folder_id, file_id, file_url)
+                    processed_files.add(file_id)
+                    # Also process additional files
+                    for add_file_id, add_file_url in additional_files:
+                        save_processed_file(root_folder_id, add_file_id, add_file_url)
+                        processed_files.add(add_file_id)
+                        logger.info(f"  Also marked as processed: {add_file_id}")
+                    logger.success(f"Done: {item['name']}")
+                elif error_msg and error_msg.startswith("SKIP:"):
+                    # File should be skipped (e.g., zero bytes)
+                    skip_reason = error_msg[5:].strip()  # Remove "SKIP:" prefix
+                    save_skipped_file(root_folder_id, file_id, file_url, item['mimeType'], skip_reason)
+                    skipped_files.add(file_id)
+                    # Also skip additional files
+                    for add_file_id, add_file_url in additional_files:
+                        save_skipped_file(root_folder_id, add_file_id, add_file_url, item['mimeType'], skip_reason)
+                        skipped_files.add(add_file_id)
+                        logger.info(f"  Also marked as skipped: {add_file_id}")
+                    logger.warning(f"Skipped: {item['name']} - {skip_reason}")
+                else:
+                    save_failed_file(root_folder_id, file_id, file_url, item['name'], error_msg)
+                    failed_files.add(file_id)
+                    # Also fail additional files
+                    for add_file_id, add_file_url in additional_files:
+                        save_failed_file(root_folder_id, add_file_id, add_file_url, item['name'], error_msg)
+                        failed_files.add(add_file_id)
+                        logger.info(f"  Also marked as failed: {add_file_id}")
+                    logger.error(f"Failed permanently: {item['name']}")
+            else:
+                file_id = item['id']
+                file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+
+                if file_id not in skipped_files:
+                    save_skipped_file(root_folder_id, file_id, file_url, item['mimeType'])
+                    skipped_files.add(file_id)
+                    logger.info(f"Skipping (not image/video/audio): {item['name']} (type: {item['mimeType']})")
 
 
 # ============================================================================
