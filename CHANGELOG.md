@@ -1,5 +1,88 @@
 # Changelog
 
+## [2026-03-07] Intelligent Audio/Video Pair Matching with Naming Variations
+
+### Summary
+Enhanced audio/video file matching to handle common naming patterns where filenames differ by keywords like "video" and "audio".
+
+### New Matching Capabilities
+
+The script now intelligently matches audio and video files even when they have different naming patterns:
+
+**Examples of matched pairs:**
+- `video1095480922.mp4` ↔ `audio1095480922.m4a`
+- `recording_video.mov` ↔ `recording_audio.m4a`
+- `video_concert.mp4` ↔ `audio_concert.m4a`
+- `my_video_file.mp4` ↔ `my_audio_file.m4a`
+- `vid123.mp4` ↔ `aud123.m4a` (short forms)
+- `VIDEO123.mp4` ↔ `audio123.m4a` (case-insensitive)
+
+### How It Works
+
+**Filename Normalization:**
+1. Converts filenames to lowercase
+2. Removes common video/audio keywords with various separators:
+   - Prefixes: `video_`, `audio_`, `vid_`, `aud_`
+   - Suffixes: `_video`, `_audio`, `_vid`, `_aud`
+   - With dashes: `video-`, `-video`, `audio-`, `-audio`
+   - With spaces: `video `, ` video`, `audio `, ` audio`
+3. Removes keywords at start/end without separators
+4. Compares normalized versions for matching
+
+**Matching Logic:**
+1. First tries exact base name match (fastest)
+2. Falls back to normalized comparison
+3. Only considers it a match if both files have content after normalization
+
+### Implementation Details
+
+**New Functions:**
+- `normalize_filename_for_matching(filename)` - Removes video/audio keywords for comparison
+- `filenames_match(name1, name2)` - Checks if two filenames match using exact or normalized comparison
+
+**Enhanced Functions:**
+- `find_matching_audio_file()` - Now searches all audio files and uses intelligent matching
+- `find_matching_video_file()` - Now searches all video files and uses intelligent matching
+
+**Logging Enhancements:**
+- Shows original base name
+- Shows normalized version for debugging
+- Lists all candidates checked
+- Clear indication of match/no-match
+
+### Testing
+
+Added 16 comprehensive unit tests:
+
+**TestFilenameNormalization (8 tests):**
+- Video/audio prefix/suffix handling
+- Short forms (vid/aud)
+- Case insensitivity
+- Complex names with multiple keywords
+- Names without keywords (unchanged)
+
+**TestFilenameMatching (8 tests):**
+- Exact matches
+- Prefix/suffix patterns
+- Mixed patterns (prefix on one, suffix on other)
+- Short form matching
+- Different names (should not match)
+- Case-insensitive matching
+- Real-world example validation
+
+All 38 unit tests pass successfully (22 original + 16 new).
+
+### Benefits
+
+✓ Handles diverse naming conventions automatically
+✓ Case-insensitive for improved reliability
+✓ Supports both full keywords and short forms
+✓ Maintains exact match priority for performance
+✓ Extensive test coverage ensures correctness
+✓ Detailed logging for troubleshooting
+
+---
+
 ## [2024-03-07] Automatic Video+Audio Stream Combination
 
 ### Summary
