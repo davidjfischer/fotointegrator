@@ -476,9 +476,82 @@ def should_convert_video(file_name):
     return ext in VIDEO_FORMATS_TO_CONVERT
 
 
+def normalize_filename_for_matching(filename):
+    """
+    Normalize a filename for matching audio/video pairs.
+    Removes common keywords and separators to find related files.
+
+    Examples:
+        "video123" -> "123"
+        "recording_video" -> "recording"
+        "my_audio_file" -> "my_file"
+    """
+    # Convert to lowercase
+    normalized = filename.lower()
+
+    # Remove common video/audio keywords with various separators
+    patterns_to_remove = [
+        'video_', '_video', 'video-', '-video', 'video ', ' video',
+        'audio_', '_audio', 'audio-', '-audio', 'audio ', ' audio',
+        'vid_', '_vid', 'vid-', '-vid', 'vid ', ' vid',
+        'aud_', '_aud', 'aud-', '-aud', 'aud ', ' aud',
+    ]
+
+    for pattern in patterns_to_remove:
+        normalized = normalized.replace(pattern, '')
+
+    # Also try removing the keywords without separators at start/end
+    if normalized.startswith('video'):
+        normalized = normalized[5:]
+    if normalized.startswith('audio'):
+        normalized = normalized[5:]
+    if normalized.startswith('vid'):
+        normalized = normalized[3:]
+    if normalized.startswith('aud'):
+        normalized = normalized[3:]
+
+    if normalized.endswith('video'):
+        normalized = normalized[:-5]
+    if normalized.endswith('audio'):
+        normalized = normalized[:-5]
+    if normalized.endswith('vid'):
+        normalized = normalized[:-3]
+    if normalized.endswith('aud'):
+        normalized = normalized[:-3]
+
+    # Remove extra separators at start/end
+    normalized = normalized.strip('_- ')
+
+    return normalized
+
+
+def filenames_match(name1, name2):
+    """
+    Check if two filenames match for audio/video pairing.
+
+    Returns True if:
+    1. Exact base name match, OR
+    2. Normalized base names match (after removing video/audio keywords)
+    """
+    # Exact match
+    if name1 == name2:
+        return True
+
+    # Normalized match
+    norm1 = normalize_filename_for_matching(name1)
+    norm2 = normalize_filename_for_matching(name2)
+
+    # Only consider it a match if there's something left after normalization
+    if norm1 and norm2 and norm1 == norm2:
+        return True
+
+    return False
+
+
 def find_matching_audio_file(service, folder_id, video_filename):
     """
     Search for an audio file with the same base name as the video file.
+    Handles common naming variations like "video123.mp4" / "audio123.m4a".
     Returns (file_id, file_name) tuple if found, None otherwise.
     """
     base_name = os.path.splitext(video_filename)[0]
@@ -486,27 +559,34 @@ def find_matching_audio_file(service, folder_id, video_filename):
 
     logger.info(f"  Searching for matching audio file...")
     logger.info(f"    Base name: {base_name}")
+    logger.info(f"    Normalized: {normalize_filename_for_matching(base_name)}")
     logger.info(f"    Looking for extensions: {', '.join(audio_extensions)}")
 
     try:
-        # Search for files with the same base name
-        query = f"'{folder_id}' in parents and trashed = false and name contains '{base_name}'"
+        # Search broadly - look for all audio files in the folder
+        query = f"'{folder_id}' in parents and trashed = false"
         results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
         items = results.get('files', [])
 
-        logger.info(f"    Found {len(items)} file(s) matching base name '{base_name}'")
-
+        audio_candidates = []
         for item in items:
-            item_base_name = os.path.splitext(item['name'])[0]
             item_ext = os.path.splitext(item['name'].lower())[1]
-            logger.info(f"      - Checking: {item['name']} (type: {item.get('mimeType', 'unknown')})")
+            if item_ext in audio_extensions or 'audio' in item.get('mimeType', ''):
+                audio_candidates.append(item)
 
-            # Check if it's an audio file with exact base name match
-            if item_base_name == base_name and (item_ext in audio_extensions or 'audio' in item.get('mimeType', '')):
+        logger.info(f"    Found {len(audio_candidates)} audio file(s) in folder")
+
+        for item in audio_candidates:
+            item_base_name = os.path.splitext(item['name'])[0]
+            logger.info(f"      - Checking: {item['name']}")
+            logger.info(f"        Normalized: {normalize_filename_for_matching(item_base_name)}")
+
+            # Check if filenames match (exact or normalized)
+            if filenames_match(base_name, item_base_name):
                 logger.info(f"  ✓ Found matching audio file: {item['name']}")
                 return (item['id'], item['name'])
 
-        logger.warning(f"  ✗ No matching audio file found in {len(items)} candidate(s)")
+        logger.warning(f"  ✗ No matching audio file found in {len(audio_candidates)} audio file(s)")
         return None
 
     except Exception as e:
@@ -517,6 +597,7 @@ def find_matching_audio_file(service, folder_id, video_filename):
 def find_matching_video_file(service, folder_id, audio_filename):
     """
     Search for a video file with the same base name as the audio file.
+    Handles common naming variations like "audio123.m4a" / "video123.mp4".
     Returns (file_id, file_name, file_url) tuple if found, None otherwise.
     """
     base_name = os.path.splitext(audio_filename)[0]
@@ -524,28 +605,35 @@ def find_matching_video_file(service, folder_id, audio_filename):
 
     logger.info(f"  Searching for matching video file...")
     logger.info(f"    Base name: {base_name}")
+    logger.info(f"    Normalized: {normalize_filename_for_matching(base_name)}")
     logger.info(f"    Looking for extensions: {', '.join(video_extensions)}")
 
     try:
-        # Search for files with the same base name
-        query = f"'{folder_id}' in parents and trashed = false and name contains '{base_name}'"
+        # Search broadly - look for all video files in the folder
+        query = f"'{folder_id}' in parents and trashed = false"
         results = service.files().list(q=query, fields="files(id, name, mimeType, webViewLink)").execute()
         items = results.get('files', [])
 
-        logger.info(f"    Found {len(items)} file(s) matching base name '{base_name}'")
-
+        video_candidates = []
         for item in items:
-            item_base_name = os.path.splitext(item['name'])[0]
             item_ext = os.path.splitext(item['name'].lower())[1]
-            logger.info(f"      - Checking: {item['name']} (type: {item.get('mimeType', 'unknown')})")
+            if item_ext in video_extensions or 'video' in item.get('mimeType', ''):
+                video_candidates.append(item)
 
-            # Check if it's a video file with exact base name match
-            if item_base_name == base_name and (item_ext in video_extensions or 'video' in item.get('mimeType', '')):
+        logger.info(f"    Found {len(video_candidates)} video file(s) in folder")
+
+        for item in video_candidates:
+            item_base_name = os.path.splitext(item['name'])[0]
+            logger.info(f"      - Checking: {item['name']}")
+            logger.info(f"        Normalized: {normalize_filename_for_matching(item_base_name)}")
+
+            # Check if filenames match (exact or normalized)
+            if filenames_match(base_name, item_base_name):
                 file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{item['id']}/view")
                 logger.info(f"  ✓ Found matching video file: {item['name']}")
                 return (item['id'], item['name'], file_url)
 
-        logger.warning(f"  ✗ No matching video file found in {len(items)} candidate(s)")
+        logger.warning(f"  ✗ No matching video file found in {len(video_candidates)} video file(s)")
         return None
 
     except Exception as e:

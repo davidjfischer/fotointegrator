@@ -17,7 +17,9 @@ from run_fotointegrator import (
     check_ffmpeg_installed,
     save_planned_file,
     load_planned_files,
-    get_planned_files_log
+    get_planned_files_log,
+    normalize_filename_for_matching,
+    filenames_match
 )
 
 
@@ -213,6 +215,101 @@ class TestPlannedFileHandling:
             assert len(planned) == 1
             assert planned[0][2] == "test file (2024).jpg"
             assert "?" in planned[0][1]  # URL with query param
+
+
+class TestFilenameNormalization:
+    """Test filename normalization for audio/video matching."""
+
+    def test_normalize_video_prefix(self):
+        """Test normalizing filenames with 'video' prefix."""
+        assert normalize_filename_for_matching("video123") == "123"
+        assert normalize_filename_for_matching("video_recording") == "recording"
+        assert normalize_filename_for_matching("video-concert") == "concert"
+
+    def test_normalize_audio_prefix(self):
+        """Test normalizing filenames with 'audio' prefix."""
+        assert normalize_filename_for_matching("audio123") == "123"
+        assert normalize_filename_for_matching("audio_recording") == "recording"
+        assert normalize_filename_for_matching("audio-concert") == "concert"
+
+    def test_normalize_video_suffix(self):
+        """Test normalizing filenames with 'video' suffix."""
+        assert normalize_filename_for_matching("123_video") == "123"
+        assert normalize_filename_for_matching("recording_video") == "recording"
+        assert normalize_filename_for_matching("concert-video") == "concert"
+
+    def test_normalize_audio_suffix(self):
+        """Test normalizing filenames with 'audio' suffix."""
+        assert normalize_filename_for_matching("123_audio") == "123"
+        assert normalize_filename_for_matching("recording_audio") == "recording"
+        assert normalize_filename_for_matching("concert-audio") == "concert"
+
+    def test_normalize_short_forms(self):
+        """Test normalizing short forms like 'vid' and 'aud'."""
+        assert normalize_filename_for_matching("vid123") == "123"
+        assert normalize_filename_for_matching("aud123") == "123"
+        assert normalize_filename_for_matching("123_vid") == "123"
+        assert normalize_filename_for_matching("123_aud") == "123"
+
+    def test_normalize_case_insensitive(self):
+        """Test that normalization is case-insensitive."""
+        assert normalize_filename_for_matching("VIDEO123") == "123"
+        assert normalize_filename_for_matching("AUDIO123") == "123"
+        assert normalize_filename_for_matching("Video_Recording") == "recording"
+
+    def test_normalize_no_keywords(self):
+        """Test normalizing filenames without video/audio keywords."""
+        assert normalize_filename_for_matching("recording123") == "recording123"
+        assert normalize_filename_for_matching("my_file") == "my_file"
+
+    def test_normalize_complex_names(self):
+        """Test normalizing complex filenames."""
+        assert normalize_filename_for_matching("my_video_recording") == "my_recording"
+        assert normalize_filename_for_matching("recording_audio_final") == "recording_final"
+
+
+class TestFilenameMatching:
+    """Test filename matching for audio/video pairs."""
+
+    def test_exact_match(self):
+        """Test exact filename matches."""
+        assert filenames_match("recording", "recording") is True
+        assert filenames_match("test123", "test123") is True
+
+    def test_video_audio_prefix_match(self):
+        """Test matching with video/audio prefixes."""
+        assert filenames_match("video123", "audio123") is True
+        assert filenames_match("video_recording", "audio_recording") is True
+
+    def test_video_audio_suffix_match(self):
+        """Test matching with video/audio suffixes."""
+        assert filenames_match("recording_video", "recording_audio") is True
+        assert filenames_match("123_video", "123_audio") is True
+
+    def test_mixed_prefix_suffix_match(self):
+        """Test matching with mixed prefix/suffix patterns."""
+        assert filenames_match("video_recording", "recording_audio") is True
+        assert filenames_match("recording_video", "audio_recording") is True
+
+    def test_short_form_match(self):
+        """Test matching with short forms."""
+        assert filenames_match("vid123", "aud123") is True
+        assert filenames_match("123_vid", "123_aud") is True
+
+    def test_no_match_different_names(self):
+        """Test that different filenames don't match."""
+        assert filenames_match("recording1", "recording2") is False
+        assert filenames_match("video123", "audio456") is False
+
+    def test_case_insensitive_match(self):
+        """Test case-insensitive matching."""
+        assert filenames_match("Video123", "Audio123") is True
+        assert filenames_match("RECORDING_VIDEO", "recording_audio") is True
+
+    def test_real_world_example(self):
+        """Test with real-world example from user."""
+        # The exact case from the test: video1095480922 and audio1095480922
+        assert filenames_match("video1095480922", "audio1095480922") is True
 
 
 if __name__ == '__main__':
