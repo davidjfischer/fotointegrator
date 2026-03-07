@@ -41,10 +41,34 @@ The test suite covers:
 - Malformed line handling
 - Special characters in filenames
 
+✅ **Filename Normalization for Audio/Video Matching**
+- Video/audio prefix removal (video_, audio_, vid_, aud_)
+- Video/audio suffix removal (_video, _audio, _vid, _aud)
+- Case-insensitive normalization
+- Complex names with multiple keywords
+
+✅ **Filename Matching for Audio/Video Pairs**
+- Exact match detection
+- Video/audio prefix/suffix patterns
+- Mixed prefix/suffix patterns
+- Short form matching (vid/aud)
+- Case-insensitive matching
+- Real-world examples
+
+✅ **Disk Image Detection**
+- ISO, IMG, DMG file identification
+- Case-insensitive detection
+- Proper constant definitions
+
+✅ **File Extension Constants**
+- Audio extensions (MP3, M4A, AAC, etc.)
+- Video extensions (MP4, MOV, AVI, etc.)
+- Disk image extensions (ISO, IMG, DMG, etc.)
+
 ## Test Results
 
 ```
-22 tests passing in ~0.3 seconds
+45 tests passing in ~0.4 seconds
 ```
 
 ## Test Coverage

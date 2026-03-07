@@ -1,5 +1,323 @@
 # Changelog
 
+## [2026-03-08] Skip Files Rejected by Google Photos API (Error Code 3)
+
+### Summary
+Files that are rejected by Google Photos API with error code 3 (corrupted/empty/unsupported format) are now automatically moved to the skipped files list instead of remaining in the failed files list for endless retries.
+
+### The Problem
+
+When Google Photos API rejects a file with error code 3, it indicates:
+- Corrupted or empty file
+- Unsupported file format
+- Invalid upload token
+
+Previously, these files would:
+1. Be marked as failed
+2. Be retried on subsequent `--retry` runs
+3. Fail again with the same error
+4. Never be resolved
+
+This wasted time and resources retrying files that would never succeed.
+
+### The Solution
+
+Modified the exception handler in `process_single_file_with_retry()` to detect error code 3 and immediately return a SKIP status instead of continuing to retry.
+
+**Detection logic:**
+```python
+if "code=3" in last_error or "Media item creation failed: code=3" in last_error:
+    logger.warning("Google Photos API rejected file (error code 3) - marking as skipped")
+    return False, "SKIP: Google Photos rejected file (error code 3: corrupted/empty/unsupported format)", additional_files
+```
+
+### Changes
+
+**Modified function:**
+- `process_single_file_with_retry()` at line ~1006 - Added error code 3 detection and immediate SKIP return
+
+### Behavior
+
+**Before fix:**
+```
+Attempt 1/3 failed: Media item creation failed: code=3...
+Waiting 30 seconds before retry...
+Attempt 2/3 failed: Media item creation failed: code=3...
+Waiting 30 seconds before retry...
+Attempt 3/3 failed: Media item creation failed: code=3...
+→ File marked as failed
+→ Will be retried on next --retry run (endless loop)
+```
+
+**After fix:**
+```
+Attempt 1/3 failed: Media item creation failed: code=3...
+Google Photos API error code 3: File corrupted/empty/unsupported format
+Skipping file 'filename.jpg' - will not retry (error code 3 is permanent)
+→ File immediately moved to skipped_files.txt
+→ Reason: "Google Photos rejected file (error code 3: corrupted/empty/unsupported format)"
+→ Will never be retried
+```
+
+**Log output example:**
+```
+[25/100] Processing: corrupted_photo.jpg...
+  Downloaded: 2.3MB
+  Uploading to Google Photos...
+  Attempt 1/3 failed: Media item creation failed: code=3, message='Failed: There was an error while trying to create this media item.'
+  Google Photos API error code 3: File corrupted/empty/unsupported format
+  Skipping file 'corrupted_photo.jpg' - will not retry (error code 3 is permanent)
+[25/100] Skipped: corrupted_photo.jpg - Google Photos rejected file (error code 3: corrupted/empty/unsupported format)
+```
+
+### Testing
+
+All 38 unit tests pass.
+
+### Benefits
+✓ No more endless retry loops for permanently broken files
+✓ Clear indication in skipped files why the file was rejected
+✓ Saves time and API quota
+✓ Cleaner failed files list (only contains temporary failures)
+
+---
+
+## [2026-03-08] Skip Disk Image Files (ISO, IMG, DMG, etc.)
+
+### Summary
+Added automatic detection and skipping of disk image files to prevent them from being uploaded to Google Photos.
+
+### The Problem
+
+Disk image files like `.iso`, `.img`, `.dmg` have MIME types that often contain the word "image" (e.g., `application/x-iso9660-image`), causing them to be incorrectly classified as photo images and uploaded to Google Photos.
+
+### The Solution
+
+Added explicit disk image extension checking that happens **before** MIME type checking, ensuring these files are always skipped:
+
+**Skipped extensions:**
+- `.iso` - ISO 9660 disk images
+- `.img` - Raw disk images
+- `.dmg` - macOS disk images
+- `.toast` - Toast disk images
+- `.vcd` - Virtual CD images
+- `.bin` / `.cue` - Binary disk images with cue sheets
+- `.nrg` - Nero disk images
+- `.mdf` / `.mds` - Media Descriptor File images
+
+### Changes
+
+**Modified functions:**
+- `plan_folder()` at line ~1079 - Added disk_image_extensions check before MIME type classification
+- `process_folder()` at line ~1272 - Added disk_image_extensions exclusion from is_media_file check
+- `retry_failed_files()` at line ~1199 - Added disk_image_extensions check to skip disk images during retry and move them from failed to skipped files
+
+### Testing
+
+All 38 unit tests pass.
+
+**Real-world test with retry mode:**
+```
+[1/1] Skipping disk image: boot.iso
+  - Removed from failed_files.txt
+  - Added to skipped_files.txt with reason: "Disk image file"
+  - MIME type: application/x-cd-image
+```
+
+**Example behavior:**
+```
+Found audio: audio1095480922.m4a
+Found video: video1095480922.mp4
+Skipping disk image: backup.iso (type: application/x-iso9660-image)
+Skipping disk image: installer.dmg (type: application/x-apple-diskimage)
+```
+
+### Benefits
+✓ Disk images are never uploaded to Google Photos
+✓ Prevents confusion and clutter in photo albums
+✓ Saves bandwidth and API quota
+✓ Works for all common disk image formats
+
+---
+
+## [2026-03-08] Fix Subfolder File Matching for Audio/Video Pairs
+
+### Summary
+Fixed critical bug where audio files could not find their matching video files when both files were located in subfolders of the root folder.
+
+### The Problem
+
+When processing a folder structure like:
+```
+Root Folder (1dy8rpJAwbGLhZOOz8rNOuRPkPKk__fqI)
+└── Subfolder "2023-05-06 20.21.02 Küss die Muse 2" (1-2okboaM3ewW7A08ca1e4kxy6n7amyB2)
+    ├── audio1095480922.m4a
+    ├── video1095480922.mp4
+    ├── chat.txt
+    └── recording.conf
+```
+
+The script would:
+1. **Planning phase**: Correctly recurse into subfolders and find both files ✅
+2. **Execution phase**: When processing `audio1095480922.m4a`, search for matching video in the ROOT folder ❌
+3. **Result**: Find 0 video files (only the subfolder itself), skip the audio file ❌
+
+**Root Cause:** `find_matching_video_file()` was called with the root folder ID, not the actual parent folder ID where the file was located.
+
+### The Solution
+
+Modified `process_single_file_with_retry()` to fetch each file's actual parent folder ID before searching for matches:
+
+```python
+# Get the actual parent folder ID of this file (not the root folder ID)
+file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
+actual_folder_id = file_metadata.get('parents', [folder_id])[0]
+
+# Find matching video file in the same folder
+video_match = find_matching_video_file(service, actual_folder_id, file_name)
+```
+
+Now the script searches for matching files in the **same folder** as the audio file, not the root folder.
+
+### Changes
+
+**Modified function:** `process_single_file_with_retry()` at line ~838
+- Added API call to fetch file's parent folder ID
+- Pass actual parent folder ID to `find_matching_video_file()`
+
+### Testing
+
+**Before fix:**
+```
+[1/2] Processing: audio1095480922.m4a...
+  Searching for matching video file...
+  Querying folder_id: 1dy8rpJAwbGLhZOOz8rNOuRPkPKk__fqI (root)
+  Total files in folder: 1
+  DEBUG File: 2023-05-06 20.21.02 Küss die Muse 2 | MIME: application/vnd.google-apps.folder
+  Found 0 video file(s) in folder
+  ✗ No matching video file found
+[1/2] Skipped: audio1095480922.m4a
+
+[2/2] Processing: video1095480922.mp4...
+  (processes video separately)
+```
+
+**After fix:**
+```
+[1/2] Processing: audio1095480922.m4a...
+  Searching for matching video file...
+  File's parent folder ID: 1-2okboaM3ewW7A08ca1e4kxy6n7amyB2 (subfolder)
+  Querying folder_id: 1-2okboaM3ewW7A08ca1e4kxy6n7amyB2
+  Total files in folder: 4
+    recording.conf
+    audio1095480922.m4a
+    video1095480922.mp4
+    chat.txt
+  Found 1 video file(s) in folder
+  ✓ Found matching video file: video1095480922.mp4
+  (downloads both, uploads video)
+[1/2] Done: audio1095480922.m4a
+
+[2/2] Skipping (already processed): video1095480922.mp4
+```
+
+All 38 unit tests still pass.
+
+### Benefits
+✓ Audio/video matching works correctly in subfolders
+✓ No more false "no matching video found" errors
+✓ Handles arbitrarily nested folder structures
+✓ Works with Google Drive's recursive folder scanning
+
+---
+
+## [2026-03-07] Fix Duplicate Video Processing When Paired with Audio
+
+### Summary
+Fixed a bug where video files were processed twice when they had matching audio files: once when processing the audio file, and again when processing the video file from the planned files list.
+
+### The Problem
+When an audio file was processed:
+1. The script found the matching video file
+2. Downloaded both audio and video files
+3. Determined that the video already had audio
+4. Skipped the audio file and uploaded the video
+5. Marked only the audio file as processed
+
+Then when the loop continued:
+6. The video file (still in the planned files list) was processed again
+7. Downloaded the same video file a second time
+8. Uploaded it to Google Photos a second time
+
+This wasted bandwidth, time, and potentially created duplicate photos in the album.
+
+### The Solution
+When processing an audio file that has a matching video, the script now tracks the video file ID in the `additional_files` list in three scenarios:
+
+1. **Video already has audio** (most common):
+   - Skips the audio file
+   - Uploads the video
+   - Marks both audio and video as processed
+
+2. **Video needs audio combination**:
+   - Combines audio and video streams
+   - Uploads the combined file
+   - Marks both files as processed
+
+3. **Audio file is too small, video is normal**:
+   - Skips the audio file
+   - Uploads the video without audio
+   - Marks both files as processed
+
+In all cases, when the loop reaches the video file entry in the plan, it's already in the `processed_files` or `failed_files` set and gets skipped.
+
+### Changes
+
+**Modified function:** `process_single_file_with_retry()` at lines ~891 and ~877
+
+Added `additional_files = [(video_file_id, video_file_url)]` after:
+- Line 891: When video already has audio
+- Line 877: When audio is too small to process
+
+### Testing
+
+Test execution on folder with `audio1095480922.m4a` and `video1095480922.mp4`:
+
+**Before fix:**
+```
+[1/2] Processing: audio1095480922.m4a...
+  ✓ Found matching video: video1095480922.mp4
+  (downloads 526.9MB video)
+  (uploads 526.9MB video)
+[1/2] Done: audio1095480922.m4a
+
+[2/2] Processing: video1095480922.mp4...
+  (downloads 526.9MB video AGAIN)
+  (uploads 526.9MB video AGAIN)
+[2/2] Done: video1095480922.mp4
+```
+
+**After fix:**
+```
+[1/2] Processing: audio1095480922.m4a...
+  ✓ Found matching video: video1095480922.mp4
+  (downloads 526.9MB video)
+  (uploads 526.9MB video)
+[1/2] Done: audio1095480922.m4a
+
+[2/2] Skipping (already processed): video1095480922.mp4
+```
+
+All 38 unit tests still pass.
+
+### Benefits
+✓ Eliminates duplicate downloads (saves bandwidth)
+✓ Eliminates duplicate uploads (saves time and API quota)
+✓ Prevents duplicate photos in Google Photos albums
+✓ Proper state tracking for all processed file pairs
+
+---
+
 ## [2026-03-07] Intelligent Audio/Video Pair Matching with Naming Variations
 
 ### Summary

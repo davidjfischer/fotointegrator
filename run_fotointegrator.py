@@ -60,6 +60,11 @@ RETRY_WAIT_SECONDS = 30
 # File size validation
 MIN_FILE_SIZE_BYTES = 16384  # Default minimum file size in bytes (16 KB)
 
+# File type extensions
+AUDIO_EXTENSIONS = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
+VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm', '.mts', '.m2ts', '.mpg', '.mpeg', '.wmv']
+DISK_IMAGE_EXTENSIONS = ['.iso', '.img', '.dmg', '.toast', '.vcd', '.bin', '.cue', '.nrg', '.mdf', '.mds']
+
 # Video conversion
 VIDEO_FORMATS_TO_CONVERT = ['.mts', '.m2ts', '.mod', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.mpg', '.mpeg', '.vob']
 FFMPEG_CRF_QUALITY = '23'  # 18-28 recommended, 23 is default
@@ -555,12 +560,11 @@ def find_matching_audio_file(service, folder_id, video_filename):
     Returns (file_id, file_name) tuple if found, None otherwise.
     """
     base_name = os.path.splitext(video_filename)[0]
-    audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
 
     logger.info(f"  Searching for matching audio file...")
     logger.info(f"    Base name: {base_name}")
     logger.info(f"    Normalized: {normalize_filename_for_matching(base_name)}")
-    logger.info(f"    Looking for extensions: {', '.join(audio_extensions)}")
+    logger.info(f"    Looking for extensions: {', '.join(AUDIO_EXTENSIONS)}")
 
     try:
         # Search broadly - look for all audio files in the folder
@@ -571,7 +575,10 @@ def find_matching_audio_file(service, folder_id, video_filename):
         audio_candidates = []
         for item in items:
             item_ext = os.path.splitext(item['name'].lower())[1]
-            if item_ext in audio_extensions or 'audio' in item.get('mimeType', ''):
+            # Explicitly exclude video file extensions
+            if item_ext in VIDEO_EXTENSIONS:
+                continue
+            if item_ext in AUDIO_EXTENSIONS or 'audio' in item.get('mimeType', ''):
                 audio_candidates.append(item)
 
         logger.info(f"    Found {len(audio_candidates)} audio file(s) in folder")
@@ -601,12 +608,11 @@ def find_matching_video_file(service, folder_id, audio_filename):
     Returns (file_id, file_name, file_url) tuple if found, None otherwise.
     """
     base_name = os.path.splitext(audio_filename)[0]
-    video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm']
 
     logger.info(f"  Searching for matching video file...")
     logger.info(f"    Base name: {base_name}")
     logger.info(f"    Normalized: {normalize_filename_for_matching(base_name)}")
-    logger.info(f"    Looking for extensions: {', '.join(video_extensions)}")
+    logger.info(f"    Looking for extensions: {', '.join(VIDEO_EXTENSIONS)}")
 
     try:
         # Search broadly - look for all video files in the folder
@@ -617,7 +623,10 @@ def find_matching_video_file(service, folder_id, audio_filename):
         video_candidates = []
         for item in items:
             item_ext = os.path.splitext(item['name'].lower())[1]
-            if item_ext in video_extensions or 'video' in item.get('mimeType', ''):
+            # Explicitly exclude audio file extensions even if MIME type says "video"
+            if item_ext in AUDIO_EXTENSIONS:
+                continue
+            if item_ext in VIDEO_EXTENSIONS or 'video' in item.get('mimeType', ''):
                 video_candidates.append(item)
 
         logger.info(f"    Found {len(video_candidates)} video file(s) in folder")
@@ -808,8 +817,7 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
     additional_files = []
 
     file_ext = os.path.splitext(file_name.lower())[1]
-    audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
-    is_audio_file = file_ext in audio_extensions
+    is_audio_file = file_ext in AUDIO_EXTENSIONS
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -818,8 +826,14 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
                 logger.info(f"  Audio file detected: {file_name}")
                 logger.info(f"  Looking for matching video file...")
 
-                # Find matching video file
-                video_match = find_matching_video_file(service, folder_id, file_name)
+                # Get the actual parent folder ID of this file (not the root folder ID)
+                # This handles cases where files are in subfolders
+                file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
+                actual_folder_id = file_metadata.get('parents', [folder_id])[0]
+                logger.info(f"  File's parent folder ID: {actual_folder_id}")
+
+                # Find matching video file in the same folder
+                video_match = find_matching_video_file(service, actual_folder_id, file_name)
 
                 if not video_match:
                     logger.warning(f"  ✗ No matching video file found - skipping audio file")
@@ -866,6 +880,8 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
                     audio_file = None
                     local_file = video_file
                     file_name = video_file_name  # Use video name for the rest of processing
+                    # Track the video file as additional so it's not processed again
+                    additional_files = [(video_file_id, video_file_url)]
                     logger.info(f"  Will process video file normally without audio")
                 else:
                     # Both files are valid size - check if video has audio
@@ -880,6 +896,8 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
                         audio_file = None
                         local_file = video_file
                         file_name = video_file_name
+                        # Track the video file as additional so it's not processed again
+                        additional_files = [(video_file_id, video_file_url)]
                         logger.info(f"  Will process video file normally")
                     else:
                         # Video doesn't have audio - combine them
@@ -986,6 +1004,40 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
             last_error = str(e)
             logger.exception(f"  Attempt {attempt}/{max_retries} failed: {last_error}")
 
+            # Check if this is a Google Photos API error code 3 (corrupted/empty/unsupported file)
+            # These files should be skipped, not retried
+            if "code=3" in last_error or "Media item creation failed: code=3" in last_error:
+                logger.warning(f"  Google Photos API error code 3: File corrupted/empty/unsupported format")
+                logger.warning(f"  Skipping file '{file_name}' - will not retry (error code 3 is permanent)")
+                # Cleanup files
+                if local_file and os.path.exists(local_file):
+                    try:
+                        os.remove(local_file)
+                    except:
+                        pass
+                if converted_file and os.path.exists(converted_file) and converted_file != local_file:
+                    try:
+                        os.remove(converted_file)
+                    except:
+                        pass
+                if audio_file and os.path.exists(audio_file):
+                    try:
+                        os.remove(audio_file)
+                    except:
+                        pass
+                if video_file and os.path.exists(video_file):
+                    try:
+                        os.remove(video_file)
+                    except:
+                        pass
+                if combined_file and os.path.exists(combined_file) and combined_file != local_file:
+                    try:
+                        os.remove(combined_file)
+                    except:
+                        pass
+                # Return SKIP status
+                return False, f"SKIP: Google Photos rejected file (error code 3: corrupted/empty/unsupported format)", additional_files
+
             # Cleanup
             if local_file and os.path.exists(local_file):
                 try:
@@ -1052,15 +1104,17 @@ def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
         else:
             # Check file extension to handle cases where MIME type is ambiguous
             file_ext = os.path.splitext(item['name'].lower())[1]
-            audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
-            video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm', '.mts', '.m2ts', '.mpg', '.mpeg', '.wmv']
 
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
 
+            # Skip disk image files (they might have MIME types containing "image" but aren't photos)
+            if file_ext in DISK_IMAGE_EXTENSIONS:
+                planned_count['other'] += 1
+                logger.debug(f"Skipping disk image: {item['name']} (type: {item['mimeType']})")
             # Prioritize file extension over MIME type for audio files
             # (because .m4a files often have video/mp4 MIME type)
-            if file_ext in audio_extensions:
+            elif file_ext in AUDIO_EXTENSIONS:
                 save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
                 planned_count['audio'] += 1
                 logger.info(f"Found audio: {item['name']}")
@@ -1068,7 +1122,7 @@ def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
                 save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
                 planned_count['images'] += 1
                 logger.info(f"Found image: {item['name']}")
-            elif file_ext in video_extensions or 'video' in item['mimeType']:
+            elif file_ext in VIDEO_EXTENSIONS or 'video' in item['mimeType']:
                 save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
                 planned_count['videos'] += 1
                 logger.info(f"Found video: {item['name']}")
@@ -1173,6 +1227,21 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
             success_count += 1
             continue
 
+        # Check if file should be skipped based on extension (e.g., disk images)
+        file_ext = os.path.splitext(file_name.lower())[1]
+
+        if file_ext in DISK_IMAGE_EXTENSIONS:
+            logger.info(f"[{idx}/{total_files}] Skipping disk image: {file_name}")
+            # Move from failed to skipped
+            try:
+                file_metadata = service.files().get(fileId=file_id, fields='mimeType').execute()
+                mime_type = file_metadata.get('mimeType', 'unknown')
+            except:
+                mime_type = 'unknown'
+            save_skipped_file(folder_id, file_id, file_url, mime_type, "Disk image file")
+            remove_from_failed_files(folder_id, file_id)
+            continue
+
         logger.info(f"[{idx}/{total_files}] Retrying: {file_name}")
         logger.info(f"  Previous error: {old_error}")
 
@@ -1243,16 +1312,18 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
         else:
             # Check file extension to identify audio/video files correctly
             file_ext = os.path.splitext(item['name'].lower())[1]
-            audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
-            video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm', '.mts', '.m2ts', '.mpg', '.mpeg', '.wmv']
 
-            is_media_file = (
-                'image' in item['mimeType'] or
-                'video' in item['mimeType'] or
-                'audio' in item['mimeType'] or
-                file_ext in audio_extensions or
-                file_ext in video_extensions
-            )
+            # Exclude disk images even if MIME type contains "image"
+            if file_ext in DISK_IMAGE_EXTENSIONS:
+                is_media_file = False
+            else:
+                is_media_file = (
+                    'image' in item['mimeType'] or
+                    'video' in item['mimeType'] or
+                    'audio' in item['mimeType'] or
+                    file_ext in AUDIO_EXTENSIONS or
+                    file_ext in VIDEO_EXTENSIONS
+                )
 
             if is_media_file:
                 file_id = item['id']

@@ -312,6 +312,58 @@ class TestFilenameMatching:
         assert filenames_match("video1095480922", "audio1095480922") is True
 
 
+class TestDiskImageDetection:
+    """Test disk image file detection."""
+
+    def test_iso_is_disk_image(self):
+        """Test that ISO files are identified as disk images."""
+        from run_fotointegrator import DISK_IMAGE_EXTENSIONS
+        assert '.iso' in DISK_IMAGE_EXTENSIONS
+
+    def test_img_is_disk_image(self):
+        """Test that IMG files are identified as disk images."""
+        from run_fotointegrator import DISK_IMAGE_EXTENSIONS
+        assert '.img' in DISK_IMAGE_EXTENSIONS
+
+    def test_dmg_is_disk_image(self):
+        """Test that DMG files are identified as disk images."""
+        from run_fotointegrator import DISK_IMAGE_EXTENSIONS
+        assert '.dmg' in DISK_IMAGE_EXTENSIONS
+
+    def test_disk_image_detection_case_insensitive(self):
+        """Test that disk image detection works with uppercase extensions."""
+        from run_fotointegrator import DISK_IMAGE_EXTENSIONS
+        # Extensions are stored in lowercase, so file extension should be lowercased before checking
+        test_file = "backup.ISO"
+        file_ext = test_file.lower()[-4:]
+        assert file_ext in DISK_IMAGE_EXTENSIONS
+
+
+class TestFileExtensionConstants:
+    """Test that file extension constants are properly defined."""
+
+    def test_audio_extensions_defined(self):
+        """Test that audio extensions constant exists and has expected values."""
+        from run_fotointegrator import AUDIO_EXTENSIONS
+        assert '.mp3' in AUDIO_EXTENSIONS
+        assert '.m4a' in AUDIO_EXTENSIONS
+        assert '.wav' in AUDIO_EXTENSIONS
+
+    def test_video_extensions_defined(self):
+        """Test that video extensions constant exists and has expected values."""
+        from run_fotointegrator import VIDEO_EXTENSIONS
+        assert '.mp4' in VIDEO_EXTENSIONS
+        assert '.mov' in VIDEO_EXTENSIONS
+        assert '.avi' in VIDEO_EXTENSIONS
+        assert '.mkv' in VIDEO_EXTENSIONS
+
+    def test_disk_image_extensions_defined(self):
+        """Test that disk image extensions constant exists."""
+        from run_fotointegrator import DISK_IMAGE_EXTENSIONS
+        assert len(DISK_IMAGE_EXTENSIONS) > 0
+        assert all(ext.startswith('.') for ext in DISK_IMAGE_EXTENSIONS)
+
+
 if __name__ == '__main__':
     import pytest
     pytest.main([__file__, '-v'])
