@@ -17,7 +17,7 @@ from run_fotointegrator import (
     check_ffmpeg_installed,
     save_planned_file,
     load_planned_files,
-    PLANNED_FILES_LOG
+    get_planned_files_log
 )
 
 
@@ -127,7 +127,7 @@ class TestPlannedFileHandling:
     def setup_method(self):
         """Create a temporary directory for test files."""
         self.test_dir = tempfile.mkdtemp()
-        self.original_log = PLANNED_FILES_LOG
+        self.test_folder_id = "test_folder_123"
 
     def teardown_method(self):
         """Clean up temporary directory."""
@@ -137,15 +137,15 @@ class TestPlannedFileHandling:
         """Test saving and loading planned files."""
         test_file = os.path.join(self.test_dir, 'test_planned.txt')
 
-        # Mock the PLANNED_FILES_LOG constant
-        with patch('run_fotointegrator.PLANNED_FILES_LOG', test_file):
+        # Mock the get_planned_files_log function
+        with patch('run_fotointegrator.get_planned_files_log', return_value=test_file):
             # Save some test files
-            save_planned_file("file1", "https://drive.google.com/file1", "test1.jpg", "image/jpeg")
-            save_planned_file("file2", "https://drive.google.com/file2", "test2.mp4", "video/mp4")
-            save_planned_file("file3", "https://drive.google.com/file3", "test3.mts", "video/mp2t")
+            save_planned_file(self.test_folder_id, "file1", "https://drive.google.com/file1", "test1.jpg", "image/jpeg")
+            save_planned_file(self.test_folder_id, "file2", "https://drive.google.com/file2", "test2.mp4", "video/mp4")
+            save_planned_file(self.test_folder_id, "file3", "https://drive.google.com/file3", "test3.mts", "video/mp2t")
 
             # Load and verify
-            planned = load_planned_files()
+            planned = load_planned_files(self.test_folder_id)
 
             assert planned is not None
             assert len(planned) == 3
@@ -163,8 +163,8 @@ class TestPlannedFileHandling:
         """Test loading when plan file doesn't exist."""
         non_existent = os.path.join(self.test_dir, 'nonexistent.txt')
 
-        with patch('run_fotointegrator.PLANNED_FILES_LOG', non_existent):
-            result = load_planned_files()
+        with patch('run_fotointegrator.get_planned_files_log', return_value=non_existent):
+            result = load_planned_files(self.test_folder_id)
             assert result is None
 
     def test_load_planned_files_empty(self):
@@ -172,8 +172,8 @@ class TestPlannedFileHandling:
         empty_file = os.path.join(self.test_dir, 'empty.txt')
         open(empty_file, 'w').close()
 
-        with patch('run_fotointegrator.PLANNED_FILES_LOG', empty_file):
-            result = load_planned_files()
+        with patch('run_fotointegrator.get_planned_files_log', return_value=empty_file):
+            result = load_planned_files(self.test_folder_id)
             assert result == []
 
     def test_load_planned_files_malformed_line(self):
@@ -186,8 +186,8 @@ class TestPlannedFileHandling:
             f.write("another|bad\n")  # Only 2 fields
             f.write("file2|url2|name2|type2\n")  # Valid line
 
-        with patch('run_fotointegrator.PLANNED_FILES_LOG', test_file):
-            result = load_planned_files()
+        with patch('run_fotointegrator.get_planned_files_log', return_value=test_file):
+            result = load_planned_files(self.test_folder_id)
 
             # Should only load the 2 valid lines
             assert len(result) == 2
@@ -198,9 +198,10 @@ class TestPlannedFileHandling:
         """Test files with special characters in names."""
         test_file = os.path.join(self.test_dir, 'special.txt')
 
-        with patch('run_fotointegrator.PLANNED_FILES_LOG', test_file):
+        with patch('run_fotointegrator.get_planned_files_log', return_value=test_file):
             # Save file with special characters
             save_planned_file(
+                self.test_folder_id,
                 "file1",
                 "https://drive.google.com/file/d/123?view=true",
                 "test file (2024).jpg",
@@ -208,7 +209,7 @@ class TestPlannedFileHandling:
             )
 
             # Load and verify
-            planned = load_planned_files()
+            planned = load_planned_files(self.test_folder_id)
             assert len(planned) == 1
             assert planned[0][2] == "test file (2024).jpg"
             assert "?" in planned[0][1]  # URL with query param
