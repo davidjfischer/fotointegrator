@@ -514,6 +514,45 @@ def find_matching_audio_file(service, folder_id, video_filename):
         return None
 
 
+def find_matching_video_file(service, folder_id, audio_filename):
+    """
+    Search for a video file with the same base name as the audio file.
+    Returns (file_id, file_name, file_url) tuple if found, None otherwise.
+    """
+    base_name = os.path.splitext(audio_filename)[0]
+    video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm']
+
+    logger.info(f"  Searching for matching video file...")
+    logger.info(f"    Base name: {base_name}")
+    logger.info(f"    Looking for extensions: {', '.join(video_extensions)}")
+
+    try:
+        # Search for files with the same base name
+        query = f"'{folder_id}' in parents and trashed = false and name contains '{base_name}'"
+        results = service.files().list(q=query, fields="files(id, name, mimeType, webViewLink)").execute()
+        items = results.get('files', [])
+
+        logger.info(f"    Found {len(items)} file(s) matching base name '{base_name}'")
+
+        for item in items:
+            item_base_name = os.path.splitext(item['name'])[0]
+            item_ext = os.path.splitext(item['name'].lower())[1]
+            logger.info(f"      - Checking: {item['name']} (type: {item.get('mimeType', 'unknown')})")
+
+            # Check if it's a video file with exact base name match
+            if item_base_name == base_name and (item_ext in video_extensions or 'video' in item.get('mimeType', '')):
+                file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{item['id']}/view")
+                logger.info(f"  ✓ Found matching video file: {item['name']}")
+                return (item['id'], item['name'], file_url)
+
+        logger.warning(f"  ✗ No matching video file found in {len(items)} candidate(s)")
+        return None
+
+    except Exception as e:
+        logger.warning(f"  Error searching for video file: {e}")
+        return None
+
+
 # ============================================================================
 # FILE PROCESSING FUNCTIONS
 # ============================================================================
@@ -652,7 +691,7 @@ def upload_to_photos(creds, file_path, filename, album_id=None):
     raise Exception(f"Failed to create media item (status {res.status_code}): {result}")
 
 
-def process_single_file_with_retry(service, creds, file_id, file_name, folder_id, album_id=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
+def process_single_file_with_retry(service, creds, file_id, file_name, folder_id, file_url, album_id=None, max_retries=MAX_RETRIES, retry_wait_seconds=RETRY_WAIT_SECONDS, min_bytes=MIN_FILE_SIZE_BYTES):
     """
     Process a single file with retry logic.
 
@@ -661,39 +700,134 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
         creds: Google credentials
         file_id: File ID to process
         file_name: Name of the file
-        folder_id: Google Drive folder ID (for searching matching audio files)
+        folder_id: Google Drive folder ID (for searching matching audio/video files)
+        file_url: URL of the file
         album_id: Optional album ID to upload to
         max_retries: Maximum number of retry attempts (default: MAX_RETRIES)
         retry_wait_seconds: Seconds to wait between retries (default: RETRY_WAIT_SECONDS)
         min_bytes: Minimum file size in bytes (default: MIN_FILE_SIZE_BYTES)
 
-    Returns (success: bool, error_message: str or None)
+    Returns (success: bool, error_message: str or None, additional_files: list of (file_id, file_url) tuples)
     """
     local_file = None
     converted_file = None
     combined_file = None
     audio_file = None
+    video_file = None
     last_error = None
+
+    # Track additional files (for audio+video pairs)
+    additional_files = []
+
+    file_ext = os.path.splitext(file_name.lower())[1]
+    audio_extensions = ['.mp3', '.m4a', '.aac', '.wav', '.wma', '.ogg', '.flac']
+    is_audio_file = file_ext in audio_extensions
 
     for attempt in range(1, max_retries + 1):
         try:
-            # Download
-            local_file = download_from_drive(service, file_id, file_name)
-            download_size_bytes = os.path.getsize(local_file)
-            download_size = download_size_bytes / (1024 * 1024)
-            logger.info(f"  Downloaded: {download_size:.1f}MB")
+            # SPECIAL HANDLING FOR AUDIO FILES
+            if is_audio_file:
+                logger.info(f"  Audio file detected: {file_name}")
+                logger.info(f"  Looking for matching video file...")
 
-            # Validate file size - skip files below minimum threshold
-            if download_size_bytes < min_bytes:
-                logger.warning(f"  File is too small ({download_size_bytes} bytes, minimum: {min_bytes} bytes) - skipping")
-                # Cleanup and return skip indicator
-                if local_file and os.path.exists(local_file):
-                    os.remove(local_file)
-                return False, f"SKIP: File too small ({download_size_bytes} bytes, minimum: {min_bytes} bytes)"
+                # Find matching video file
+                video_match = find_matching_video_file(service, folder_id, file_name)
+
+                if not video_match:
+                    logger.warning(f"  ✗ No matching video file found - skipping audio file")
+                    return False, f"SKIP: Audio file without matching video", []
+
+                video_file_id, video_file_name, video_file_url = video_match
+                logger.info(f"  ✓ Found matching video: {video_file_name}")
+
+                # Download both audio and video
+                logger.info(f"  Downloading audio file: {file_name}...")
+                audio_file = download_from_drive(service, file_id, file_name)
+                audio_size_bytes = os.path.getsize(audio_file)
+                audio_size = audio_size_bytes / (1024 * 1024)
+                logger.info(f"  Downloaded audio: {audio_size:.1f}MB")
+
+                logger.info(f"  Downloading video file: {video_file_name}...")
+                video_file = download_from_drive(service, video_file_id, video_file_name)
+                video_size_bytes = os.path.getsize(video_file)
+                video_size = video_size_bytes / (1024 * 1024)
+                logger.info(f"  Downloaded video: {video_size:.1f}MB")
+
+                # Check if video needs to be skipped (too small)
+                if video_size_bytes < min_bytes:
+                    logger.warning(f"  Video file is too small ({video_size_bytes} bytes, minimum: {min_bytes} bytes)")
+                    logger.warning(f"  Skipping BOTH audio and video files")
+                    # Cleanup
+                    if audio_file and os.path.exists(audio_file):
+                        os.remove(audio_file)
+                    if video_file and os.path.exists(video_file):
+                        os.remove(video_file)
+                    # Return skip for both files
+                    additional_files = [(video_file_id, video_file_url)]
+                    return False, f"SKIP: Video file too small ({video_size_bytes} bytes, minimum: {min_bytes} bytes)", additional_files
+
+                # Check if audio needs to be skipped (too small)
+                if audio_size_bytes < min_bytes:
+                    logger.warning(f"  Audio file is too small ({audio_size_bytes} bytes, minimum: {min_bytes} bytes)")
+                    logger.warning(f"  Skipping audio file only")
+                    # Cleanup audio
+                    if audio_file and os.path.exists(audio_file):
+                        os.remove(audio_file)
+                    # Continue processing video only - don't return yet
+                    # Set audio_file to None so we don't try to combine
+                    audio_file = None
+                    local_file = video_file
+                    file_name = video_file_name  # Use video name for the rest of processing
+                    logger.info(f"  Will process video file normally without audio")
+                else:
+                    # Both files are valid size - check if video has audio
+                    logger.info(f"  Checking if video already has audio stream...")
+                    if video_has_audio_stream(video_file):
+                        logger.info(f"  Video already has audio stream")
+                        logger.warning(f"  Skipping audio file (video already has audio)")
+                        # Cleanup audio
+                        if audio_file and os.path.exists(audio_file):
+                            os.remove(audio_file)
+                        # Process video only
+                        audio_file = None
+                        local_file = video_file
+                        file_name = video_file_name
+                        logger.info(f"  Will process video file normally")
+                    else:
+                        # Video doesn't have audio - combine them
+                        logger.info(f"  Video has no audio stream - will combine with audio file")
+                        base_name = os.path.splitext(video_file)[0]
+                        combined_file = f"{base_name}_combined.mp4"
+                        combine_video_and_audio(video_file, audio_file, combined_file)
+
+                        # Use combined file for upload
+                        local_file = combined_file
+                        file_name = video_file_name  # Use video name for upload
+                        logger.info(f"  ✓ Will upload combined video+audio file")
+
+                        # Track the video file as additional
+                        additional_files = [(video_file_id, video_file_url)]
+
+            else:
+                # NORMAL HANDLING FOR VIDEO/IMAGE FILES
+                # Download
+                local_file = download_from_drive(service, file_id, file_name)
+                download_size_bytes = os.path.getsize(local_file)
+                download_size = download_size_bytes / (1024 * 1024)
+                logger.info(f"  Downloaded: {download_size:.1f}MB")
+
+                # Validate file size - skip files below minimum threshold
+                if download_size_bytes < min_bytes:
+                    logger.warning(f"  File is too small ({download_size_bytes} bytes, minimum: {min_bytes} bytes) - skipping")
+                    # Cleanup and return skip indicator
+                    if local_file and os.path.exists(local_file):
+                        os.remove(local_file)
+                    return False, f"SKIP: File too small ({download_size_bytes} bytes, minimum: {min_bytes} bytes)", []
 
             # Check for video files without audio and combine with separate audio if found
-            file_ext = os.path.splitext(file_name.lower())[1]
-            if file_ext in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm']:
+            # (This is the old logic for when we encounter video files first)
+            file_ext_check = os.path.splitext(file_name.lower())[1]
+            if file_ext_check in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm'] and not is_audio_file:
                 logger.info(f"  Video file detected: {file_name}")
                 logger.info(f"  Checking for audio stream in video file...")
                 if not video_has_audio_stream(local_file):
@@ -754,9 +888,11 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
                 os.remove(converted_file)
             if audio_file and os.path.exists(audio_file):
                 os.remove(audio_file)
+            if video_file and os.path.exists(video_file):
+                os.remove(video_file)
             if combined_file and os.path.exists(combined_file) and combined_file != local_file:
                 os.remove(combined_file)
-            return True, None
+            return True, None, additional_files
 
         except Exception as e:
             last_error = str(e)
@@ -778,6 +914,11 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
                     os.remove(audio_file)
                 except:
                     pass
+            if video_file and os.path.exists(video_file):
+                try:
+                    os.remove(video_file)
+                except:
+                    pass
             if combined_file and os.path.exists(combined_file) and combined_file != local_file:
                 try:
                     os.remove(combined_file)
@@ -791,7 +932,7 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
             else:
                 logger.exception(f"  All {max_retries} attempts failed")
 
-    return False, last_error
+    return False, last_error, additional_files
 
 
 # ============================================================================
@@ -800,7 +941,7 @@ def process_single_file_with_retry(service, creds, file_id, file_name, folder_id
 
 def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
     """
-    Scan folder recursively and save all image/video files to planned_files.txt.
+    Scan folder recursively and save all image/video/audio files to planned_files.txt.
 
     Args:
         service: Google Drive service
@@ -811,7 +952,7 @@ def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
     Returns the total count of files found.
     """
     if planned_count is None:
-        planned_count = {'images': 0, 'videos': 0, 'other': 0}
+        planned_count = {'images': 0, 'videos': 0, 'audio': 0, 'other': 0}
 
     query = f"'{current_folder_id}' in parents and trashed = false"
     results = service.files().list(q=query, fields="files(id, name, mimeType, webViewLink)").execute()
@@ -832,9 +973,15 @@ def plan_folder(service, root_folder_id, current_folder_id, planned_count=None):
             save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
             planned_count['videos'] += 1
             logger.info(f"Found video: {item['name']}")
+        elif 'audio' in item['mimeType']:
+            file_id = item['id']
+            file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+            save_planned_file(root_folder_id, file_id, file_url, item['name'], item['mimeType'])
+            planned_count['audio'] += 1
+            logger.info(f"Found audio: {item['name']}")
         else:
             planned_count['other'] += 1
-            logger.debug(f"Skipping (not image/video): {item['name']} (type: {item['mimeType']})")
+            logger.debug(f"Skipping (not image/video/audio): {item['name']} (type: {item['mimeType']})")
 
     return planned_count
 
@@ -860,25 +1007,39 @@ def process_from_plan(service, creds, folder_id, planned_files, album_id, proces
             continue
 
         logger.info(f"[{idx}/{total_files}] Processing: {file_name}...")
-        success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, folder_id, album_id, max_retries, retry_wait_seconds, min_bytes
+        success, error_msg, additional_files = process_single_file_with_retry(
+            service, creds, file_id, file_name, folder_id, file_url, album_id, max_retries, retry_wait_seconds, min_bytes
         )
 
         if success:
             save_processed_file(folder_id, file_id, file_url)
             processed_files.add(file_id)
             processed_count += 1
+            # Also save additional files (e.g., the video file when processing audio)
+            for add_file_id, add_file_url in additional_files:
+                save_processed_file(folder_id, add_file_id, add_file_url)
+                processed_files.add(add_file_id)
+                logger.info(f"  Also marked as processed: {add_file_id}")
             logger.success(f"[{idx}/{total_files}] Done: {file_name}")
         elif error_msg and error_msg.startswith("SKIP:"):
             # File should be skipped (e.g., zero bytes)
             skip_reason = error_msg[5:].strip()  # Remove "SKIP:" prefix
             save_skipped_file(folder_id, file_id, file_url, mime_type, skip_reason)
             skipped_count += 1
+            # Also skip additional files
+            for add_file_id, add_file_url in additional_files:
+                save_skipped_file(folder_id, add_file_id, add_file_url, mime_type, skip_reason)
+                logger.info(f"  Also marked as skipped: {add_file_id}")
             logger.warning(f"[{idx}/{total_files}] Skipped: {file_name} - {skip_reason}")
         else:
             save_failed_file(folder_id, file_id, file_url, file_name, error_msg)
             failed_files.add(file_id)
             failed_count += 1
+            # Also fail additional files
+            for add_file_id, add_file_url in additional_files:
+                save_failed_file(folder_id, add_file_id, add_file_url, file_name, error_msg)
+                failed_files.add(add_file_id)
+                logger.info(f"  Also marked as failed: {add_file_id}")
             logger.error(f"[{idx}/{total_files}] Failed permanently: {file_name}")
 
     return processed_count, failed_count, skipped_count
@@ -918,8 +1079,8 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
         logger.info(f"[{idx}/{total_files}] Retrying: {file_name}")
         logger.info(f"  Previous error: {old_error}")
 
-        success, error_msg = process_single_file_with_retry(
-            service, creds, file_id, file_name, folder_id, album_id, max_retries, retry_wait_seconds, min_bytes
+        success, error_msg, additional_files = process_single_file_with_retry(
+            service, creds, file_id, file_name, folder_id, file_url, album_id, max_retries, retry_wait_seconds, min_bytes
         )
 
         if success:
@@ -927,6 +1088,12 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
             remove_from_failed_files(folder_id, file_id)
             processed_files.add(file_id)
             success_count += 1
+            # Also process additional files
+            for add_file_id, add_file_url in additional_files:
+                save_processed_file(folder_id, add_file_id, add_file_url)
+                remove_from_failed_files(folder_id, add_file_id)
+                processed_files.add(add_file_id)
+                logger.info(f"  Also marked as processed: {add_file_id}")
             logger.success(f"[{idx}/{total_files}] Success on retry: {file_name}")
         elif error_msg and error_msg.startswith("SKIP:"):
             # File should be skipped (e.g., zero bytes)
@@ -940,11 +1107,21 @@ def retry_failed_files(service, creds, folder_id, album_id, processed_files, max
             save_skipped_file(folder_id, file_id, file_url, mime_type, skip_reason)
             remove_from_failed_files(folder_id, file_id)
             success_count += 1
+            # Also skip additional files
+            for add_file_id, add_file_url in additional_files:
+                save_skipped_file(folder_id, add_file_id, add_file_url, mime_type, skip_reason)
+                remove_from_failed_files(folder_id, add_file_id)
+                logger.info(f"  Also marked as skipped: {add_file_id}")
             logger.warning(f"[{idx}/{total_files}] Skipped: {file_name} - {skip_reason}")
         else:
             remove_from_failed_files(folder_id, file_id)
             save_failed_file(folder_id, file_id, file_url, file_name, error_msg)
             still_failed_count += 1
+            # Also fail additional files
+            for add_file_id, add_file_url in additional_files:
+                remove_from_failed_files(folder_id, add_file_id)
+                save_failed_file(folder_id, add_file_id, add_file_url, file_name, error_msg)
+                logger.info(f"  Also marked as failed: {add_file_id}")
             logger.error(f"[{idx}/{total_files}] Still failing: {file_name}")
 
     return success_count, still_failed_count
@@ -966,7 +1143,7 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
     for item in items:
         if item['mimeType'] == 'application/vnd.google-apps.folder':
             process_folder(service, creds, root_folder_id, item['id'], album_id, processed_files, failed_files, skipped_files, max_retries, retry_wait_seconds, min_bytes)
-        elif 'image' in item['mimeType'] or 'video' in item['mimeType']:
+        elif 'image' in item['mimeType'] or 'video' in item['mimeType'] or 'audio' in item['mimeType']:
             file_id = item['id']
             file_url = item.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
 
@@ -979,23 +1156,38 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
                 continue
 
             logger.info(f"Processing: {item['name']}...")
-            success, error_msg = process_single_file_with_retry(
-                service, creds, file_id, item['name'], root_folder_id, album_id, max_retries, retry_wait_seconds, min_bytes
+            success, error_msg, additional_files = process_single_file_with_retry(
+                service, creds, file_id, item['name'], root_folder_id, file_url, album_id, max_retries, retry_wait_seconds, min_bytes
             )
 
             if success:
                 save_processed_file(root_folder_id, file_id, file_url)
                 processed_files.add(file_id)
+                # Also process additional files
+                for add_file_id, add_file_url in additional_files:
+                    save_processed_file(root_folder_id, add_file_id, add_file_url)
+                    processed_files.add(add_file_id)
+                    logger.info(f"  Also marked as processed: {add_file_id}")
                 logger.success(f"Done: {item['name']}")
             elif error_msg and error_msg.startswith("SKIP:"):
                 # File should be skipped (e.g., zero bytes)
                 skip_reason = error_msg[5:].strip()  # Remove "SKIP:" prefix
                 save_skipped_file(root_folder_id, file_id, file_url, item['mimeType'], skip_reason)
                 skipped_files.add(file_id)
+                # Also skip additional files
+                for add_file_id, add_file_url in additional_files:
+                    save_skipped_file(root_folder_id, add_file_id, add_file_url, item['mimeType'], skip_reason)
+                    skipped_files.add(add_file_id)
+                    logger.info(f"  Also marked as skipped: {add_file_id}")
                 logger.warning(f"Skipped: {item['name']} - {skip_reason}")
             else:
                 save_failed_file(root_folder_id, file_id, file_url, item['name'], error_msg)
                 failed_files.add(file_id)
+                # Also fail additional files
+                for add_file_id, add_file_url in additional_files:
+                    save_failed_file(root_folder_id, add_file_id, add_file_url, item['name'], error_msg)
+                    failed_files.add(add_file_id)
+                    logger.info(f"  Also marked as failed: {add_file_id}")
                 logger.error(f"Failed permanently: {item['name']}")
         else:
             file_id = item['id']
@@ -1004,7 +1196,7 @@ def process_folder(service, creds, root_folder_id, current_folder_id, album_id=N
             if file_id not in skipped_files:
                 save_skipped_file(root_folder_id, file_id, file_url, item['mimeType'])
                 skipped_files.add(file_id)
-                logger.info(f"Skipping (not image/video): {item['name']} (type: {item['mimeType']})")
+                logger.info(f"Skipping (not image/video/audio): {item['name']} (type: {item['mimeType']})")
 
 
 # ============================================================================
@@ -1144,6 +1336,7 @@ def run_plan_mode(args):
     logger.info("Planning complete!")
     logger.info(f"Found {counts['images']} image files")
     logger.info(f"Found {counts['videos']} video files")
+    logger.info(f"Found {counts['audio']} audio files")
     logger.info(f"Found {counts['other']} other files (skipped)")
     logger.info(f"Plan saved to: {planned_log}")
 
@@ -1186,6 +1379,7 @@ def run_combined_mode(args):
     logger.info("Planning complete!")
     logger.info(f"Found {counts['images']} image files")
     logger.info(f"Found {counts['videos']} video files")
+    logger.info(f"Found {counts['audio']} audio files")
     logger.info(f"Found {counts['other']} other files (skipped)")
     logger.info(f"Plan saved to: {planned_log}")
 
